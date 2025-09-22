@@ -128,13 +128,7 @@ export { clearCache, getCache, setCache };
 
 // CORS configuration to allow specific origins
 const allowedOrigins = [
-  process.env.FRONTEND_URL?.replace(/\/$/, '') || "http://localhost:3000",
-  "http://127.0.0.1:3000",
-  "http://localhost:3000",
-  "http://localhost:5173",  // Add Vite default port
-  "http://127.0.0.1:5173",  // Add Vite alternative
-  "http://localhost:5174",  // Vite sometimes uses this
-  "http://127.0.0.1:5174"   // Vite sometimes uses this
+  process.env.FRONTEND_URL?.replace(/\/$/, '') || "https://madinaquranclass.onrender.com",
 ];
 
 console.log("Allowed CORS origins:", allowedOrigins);
