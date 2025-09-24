@@ -128,7 +128,7 @@ export { clearCache, getCache, setCache };
 
 // CORS configuration to allow specific origins
 const allowedOrigins = [
-  process.env.FRONTEND_URL?.replace(/\/$/, '') || "https://madinaquranclass.onrender.com",
+  process.env.FRONTEND_URL?.replace(/\/$/, '') || "https://madina-quran-backend.onrender.com",
   "https://madinaquran.vercel.app/",
 ];
 
