@@ -723,6 +723,109 @@ router.post('/students', async (req, res) => {
   }
 });
 
+// route for student assignment
+router.post('/students/:studentId/assign', async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { teacher_id } = req.body;
+
+    if (!teacher_id) {
+      return res.status(400).json({ error: 'Teacher ID is required' });
+    }
+
+    console.log(`👥 Assigning student ${studentId} to teacher ${teacher_id}`);
+
+    // Check if student exists
+    const { data: student, error: studentError } = await supabase
+      .from('profiles')
+      .select('id, name, email')
+      .eq('id', studentId)
+      .eq('role', 'student')
+      .single();
+
+    if (studentError || !student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    // Check if teacher exists
+    const { data: teacher, error: teacherError } = await supabase
+      .from('profiles')
+      .select('id, name, email')
+      .eq('id', teacher_id)
+      .eq('role', 'teacher')
+      .single();
+
+    if (teacherError || !teacher) {
+      return res.status(404).json({ error: 'Teacher not found' });
+    }
+
+    // Update student's teacher assignment
+    const { data, error: updateError } = await supabase
+      .from('profiles')
+      .update({ 
+        teacher_id,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', studentId)
+      .select();
+
+    if (updateError) {
+      console.error('❌ Error assigning student:', updateError);
+      return res.status(400).json({ error: updateError.message });
+    }
+
+    // Update student-teacher relationship
+    const { error: relationshipError } = await supabase
+      .from('student_teachers')
+      .upsert([
+        {
+          student_id: studentId,
+          teacher_id: teacher_id,
+          assigned_by: req.user.id,
+          assigned_at: new Date().toISOString()
+        }
+      ]);
+
+    if (relationshipError) {
+      console.error('❌ Error updating student-teacher relationship:', relationshipError);
+    }
+
+    // Log admin action
+    try {
+      await supabase
+        .from('admin_actions')
+        .insert([
+          {
+            admin_id: req.user.id,
+            action_type: 'assign_student',
+            target_type: 'profile',
+            target_id: studentId,
+            details: { 
+              student_name: student.name, 
+              teacher_id, 
+              teacher_name: teacher.name 
+            },
+            performed_at: new Date().toISOString()
+          }
+        ]);
+    } catch (logError) {
+      console.warn('⚠️ Failed to log admin action:', logError);
+    }
+
+    // Clear cache
+    clearCache('students');
+
+    res.json({ 
+      message: 'Student assigned successfully',
+      student: data[0],
+      teacher: teacher.name
+    });
+  } catch (error) {
+    console.error('❌ Error assigning student:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Reassign student to different teacher
 router.patch('/students/:id/reassign', async (req, res) => {
   try {
