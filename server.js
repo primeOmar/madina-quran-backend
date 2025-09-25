@@ -127,35 +127,42 @@ const getCache = (key) => {
 export { clearCache, getCache, setCache };
 
 // CORS configuration to allow specific origins
+// CORRECT CORS configuration
 const allowedOrigins = [
-  process.env.FRONTEND_URL?.replace(/\/$/, '') || "https://madina-quran-backend.onrender.com",
-  "https://madinaquran.vercel.app/",
+  "https://madinaquran.vercel.app", // Your Vercel frontend
+  "http://localhost:3000", // Local development
+  "https://madina-quran-backend.onrender.com", // Your own backend (for testing)
 ];
 
-console.log("Allowed CORS origins:", allowedOrigins);
+console.log("🔄 Allowed CORS origins:", allowedOrigins);
 
 const corsOptions = {
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps, curl requests)
-    if (!origin) return callback(null, true);
+    if (!origin) {
+      console.log("🔧 No origin header - allowing request");
+      return callback(null, true);
+    }
     
     // Remove trailing slash from origin for comparison
     const cleanOrigin = origin.replace(/\/$/, '');
     
     if (allowedOrigins.includes(cleanOrigin)) {
+      console.log(`✅ CORS allowed for: ${cleanOrigin}`);
       callback(null, true);
     } else {
-      console.warn("Blocked by CORS:", origin, "Allowed:", allowedOrigins);
-      // For development, allow all origins - change this in production
-      callback(null, true);
+      console.warn(`❌ CORS blocked: ${cleanOrigin}`);
+      console.warn("Allowed origins:", allowedOrigins);
+      callback(new Error('Not allowed by CORS'), false);
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range']
 };
 
-// Apply CORS middleware first
+// Apply CORS middleware
 app.use(cors(corsOptions));
 
 // Handle preflight requests for all routes - FIXED: Use a single options handler
