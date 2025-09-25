@@ -1353,6 +1353,168 @@ router.delete('/classes/:id', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+// Add these fee management routes to admin.js
+
+// Get students with fee information
+router.get('/fees/students', async (req, res) => {
+  try {
+    console.log('💰 Fetching students with fee information...');
+    
+    const { data: students, error } = await supabase
+      .from('profiles')
+      .select(`
+        id,
+        name,
+        email,
+        course,
+        status,
+        created_at,
+        teacher:teacher_id (name, email)
+      `)
+      .eq('role', 'student')
+      .order('name');
+
+    if (error) {
+      console.error('❌ Error fetching students for fees:', error);
+      return res.status(400).json({ error: error.message });
+    }
+
+    // Add mock fee data (replace with actual fee logic when implemented)
+    const studentsWithFees = students.map(student => ({
+      ...student,
+      fee_status: 'paid', // Mock data
+      amount_paid: 100, // Mock data
+      payment_date: new Date().toISOString(), // Mock data
+      payment_method: 'bank_transfer' // Mock data
+    }));
+
+    res.json(studentsWithFees);
+  } catch (error) {
+    console.error('❌ Error in fees/students:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get fee statistics
+router.get('/fees/statistics', async (req, res) => {
+  try {
+    console.log('📊 Fetching fee statistics...');
+    
+    // Get all students
+    const { data: students, error } = await supabase
+      .from('profiles')
+      .select('id, status')
+      .eq('role', 'student');
+
+    if (error) {
+      console.error('❌ Error fetching students for statistics:', error);
+      return res.status(400).json({ error: error.message });
+    }
+
+    // Mock statistics (replace with actual fee calculations)
+    const totalStudents = students.length;
+    const activeStudents = students.filter(s => s.status === 'active').length;
+    
+    const statistics = {
+      total_students: totalStudents,
+      active_students: activeStudents,
+      total_revenue: totalStudents * 100, // Mock data
+      paid_students: Math.floor(activeStudents * 0.8), // Mock data - 80% paid
+      pending_payments: Math.floor(activeStudents * 0.2), // Mock data - 20% pending
+      overdue_payments: Math.floor(activeStudents * 0.05), // Mock data - 5% overdue
+      monthly_revenue: 5000, // Mock data
+      average_fee: 100 // Mock data
+    };
+
+    res.json(statistics);
+  } catch (error) {
+    console.error('❌ Error in fees/statistics:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Confirm payment
+router.post('/fees/confirm-payment', async (req, res) => {
+  try {
+    const { paymentId, paymentMethod } = req.body;
+    
+    if (!paymentId) {
+      return res.status(400).json({ error: 'Payment ID is required' });
+    }
+
+    // Mock payment confirmation (replace with actual payment processing)
+    console.log(`✅ Payment ${paymentId} confirmed via ${paymentMethod}`);
+    
+    // Log admin action
+    try {
+      await supabase
+        .from('admin_actions')
+        .insert([
+          {
+            admin_id: req.user.id,
+            action_type: 'confirm_payment',
+            target_type: 'payment',
+            target_id: paymentId,
+            details: { paymentMethod },
+            performed_at: new Date().toISOString()
+          }
+        ]);
+    } catch (logError) {
+      console.warn('⚠️ Failed to log payment confirmation:', logError);
+    }
+
+    res.json({ 
+      message: 'Payment confirmed successfully',
+      paymentId,
+      confirmedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('❌ Error confirming payment:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Reject payment
+router.post('/fees/reject-payment', async (req, res) => {
+  try {
+    const { paymentId, reason } = req.body;
+    
+    if (!paymentId || !reason) {
+      return res.status(400).json({ error: 'Payment ID and reason are required' });
+    }
+
+    // Mock payment rejection
+    console.log(`❌ Payment ${paymentId} rejected: ${reason}`);
+    
+    // Log admin action
+    try {
+      await supabase
+        .from('admin_actions')
+        .insert([
+          {
+            admin_id: req.user.id,
+            action_type: 'reject_payment',
+            target_type: 'payment',
+            target_id: paymentId,
+            details: { reason },
+            performed_at: new Date().toISOString()
+          }
+        ]);
+    } catch (logError) {
+      console.warn('⚠️ Failed to log payment rejection:', logError);
+    }
+
+    res.json({ 
+      message: 'Payment rejected successfully',
+      paymentId,
+      reason,
+      rejectedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('❌ Error rejecting payment:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // Get live video sessions
 router.get('/video-sessions', async (req, res) => {
