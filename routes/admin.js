@@ -1197,7 +1197,7 @@ router.get('/profile', async (req, res) => {
 });
 
 // Schedule classes
-router.post('/classes/schedule', async (req, res) => {
+router.post('/classes', async (req, res) => {
   try {
     const { 
       title, 
