@@ -1197,9 +1197,20 @@ router.get('/profile', async (req, res) => {
 });
 
 // Schedule classes
-router.post('/classes', async (req, res) => {
+router.post('/classes/schedule', async (req, res) => {
   try {
-    const { title, teacher_id, scheduled_date, duration, max_students, description, recurring } = req.body;
+    const { 
+      title, 
+      teacher_id, 
+      scheduled_date, 
+      duration, 
+      max_students, 
+      description, 
+      recurring, 
+      recurrence_type, 
+      recurrence_days, 
+      recurrence_interval 
+    } = req.body;
     
     // Validate input
     if (!title || !teacher_id || !scheduled_date) {
@@ -1219,34 +1230,109 @@ router.post('/classes', async (req, res) => {
     }
 
     // Handle recurring classes
-    let classesToCreate = [{
+    let classesToCreate = [];
+    const baseClassData = {
       title,
       teacher_id,
-      scheduled_date: new Date(scheduled_date).toISOString(),
       duration: duration || 60,
       max_students: max_students || 20,
-      description,
-      status: 'scheduled'
-    }];
+      description: description || '',
+      status: 'scheduled',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
 
-    if (recurring && recurring.frequency) {
-      for (let i = 1; i <= 3; i++) {
-        const nextDate = new Date(scheduled_date);
-        nextDate.setDate(nextDate.getDate() + (7 * i));
-        
+    if (recurring && recurrence_type && recurrence_type !== 'none') {
+      const startDate = new Date(scheduled_date);
+      const totalDays = recurrence_days || 30;
+      const interval = recurrence_interval || 1;
+      
+      let currentDate = new Date(startDate);
+      let occurrenceCount = 0;
+      const maxOccurrences = 50; // Safety limit
+
+      while (occurrenceCount < maxOccurrences) {
         classesToCreate.push({
-          title,
-          teacher_id,
-          scheduled_date: nextDate.toISOString(),
-          duration: duration || 60,
-          max_students: max_students || 20,
-          description,
-          status: 'scheduled'
+          ...baseClassData,
+          scheduled_date: currentDate.toISOString(),
+          recurrence_type,
+          recurrence_sequence: occurrenceCount,
+          is_recurring: true
         });
+
+        occurrenceCount++;
+        
+        // Calculate next date based on recurrence type
+        const nextDate = new Date(currentDate);
+        switch (recurrence_type) {
+          case 'daily':
+            nextDate.setDate(currentDate.getDate() + interval);
+            break;
+          case 'weekly':
+            nextDate.setDate(currentDate.getDate() + (7 * interval));
+            break;
+          case 'monthly':
+            nextDate.setMonth(currentDate.getMonth() + interval);
+            break;
+          default:
+            break;
+        }
+
+        // Stop if we've exceeded the recurrence days
+        const daysDiff = Math.floor((nextDate - startDate) / (1000 * 60 * 60 * 24));
+        if (daysDiff >= totalDays) break;
+
+        currentDate = nextDate;
       }
+    } else {
+      // Single class
+      classesToCreate.push({
+        ...baseClassData,
+        scheduled_date: new Date(scheduled_date).toISOString(),
+        is_recurring: false
+      });
     }
 
-    // Insert classes
+    // Insert classes into database
+    const { data: createdClasses, error: insertError } = await supabase
+      .from('classes')
+      .insert(classesToCreate)
+      .select(`
+        id,
+        title,
+        teacher_id,
+        scheduled_date,
+        duration,
+        max_students,
+        description,
+        status,
+        is_recurring,
+        recurrence_type,
+        recurrence_sequence,
+        profiles:teacher_id (
+          name,
+          email
+        )
+      `);
+
+    if (insertError) {
+      console.error('❌ Error creating classes:', insertError);
+      return res.status(400).json({ error: insertError.message });
+    }
+
+    res.status(201).json({
+      message: classesToCreate.length > 1 
+        ? `Scheduled ${classesToCreate.length} recurring classes` 
+        : 'Class scheduled successfully',
+      classes: createdClasses,
+      total_occurrences: classesToCreate.length
+    });
+
+  } catch (error) {
+    console.error('❌ Error scheduling class:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});    // Insert classes
     const { data: classes, error } = await supabase
       .from('classes')
       .insert(classesToCreate)
