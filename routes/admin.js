@@ -1298,27 +1298,41 @@ router.post('/classes/schedule', async (req, res) => {
       .from('classes')
       .insert(classesToCreate)
       .select(`
-        id,
-        title,
-        teacher_id,
-        scheduled_date,
-        duration,
-        max_students,
-        description,
-        status,
-        is_recurring,
-        recurrence_type,
-        recurrence_sequence,
-        profiles:teacher_id (
-          name,
-          email
-        )
+        *,
+        teacher:teacher_id (id, name, email)
       `);
 
     if (insertError) {
       console.error('❌ Error creating classes:', insertError);
       return res.status(400).json({ error: insertError.message });
     }
+
+    // Log admin action
+    try {
+      await supabase
+        .from('admin_actions')
+        .insert(
+          createdClasses.map(cls => ({
+            admin_id: req.user.id,
+            action_type: 'create_class',
+            target_type: 'class',
+            target_id: cls.id,
+            details: { 
+              title: cls.title, 
+              teacher_id, 
+              scheduled_date: cls.scheduled_date,
+              is_recurring: cls.is_recurring,
+              recurrence_type: cls.recurrence_type
+            },
+            performed_at: new Date().toISOString()
+          }))
+        );
+    } catch (logError) {
+      console.warn('⚠️ Failed to log admin action:', logError);
+    }
+
+    // Clear cache
+    clearCache('classes');
 
     res.status(201).json({
       message: classesToCreate.length > 1 
@@ -1332,49 +1346,7 @@ router.post('/classes/schedule', async (req, res) => {
     console.error('❌ Error scheduling class:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
-});    // Insert classes
-    const { data: classes, error } = await supabase
-      .from('classes')
-      .insert(classesToCreate)
-      .select(`
-        *,
-        teacher:teacher_id (id, name, email)
-      `);
-
-    if (error) {
-      console.error('Error creating classes:', error);
-      return res.status(400).json({ error: error.message });
-    }
-
-    // Log admin action
-    try {
-      await supabase
-        .from('admin_actions')
-        .insert(
-          classes.map(cls => ({
-            admin_id: req.user.id,
-            action_type: 'create_class',
-            target_type: 'class',
-            target_id: cls.id,
-            details: { title: cls.title, teacher_id, scheduled_date: cls.scheduled_date },
-            performed_at: new Date().toISOString()
-          }))
-        );
-    } catch (logError) {
-      console.warn('⚠️ Failed to log admin action:', logError);
-    }
-
-    // Clear cache
-    clearCache('classes');
-
-    res.status(201).json(classes);
-  } catch (error) {
-    console.error('Error scheduling class:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Get all classes with filtering
+});// Get all classes with filtering
 router.get('/classes', async (req, res) => {
   try {
     const { teacher_id, status, start_date, end_date, page = 1, limit = 50 } = req.query;
