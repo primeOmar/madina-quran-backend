@@ -438,6 +438,39 @@ router.post('/teachers', async (req, res) => {
   }
 });
 
+
+// Get teacher credentials for resending invite
+router.get('/teachers/:teacherId/credentials', async (req, res) => {
+  try {
+    const { teacherId } = req.params;
+
+    // Get teacher details
+    const { data: teacher, error: teacherError } = await supabase
+      .from('profiles')
+      .select('id, name, email, status')
+      .eq('id', teacherId)
+      .eq('role', 'teacher')
+      .single();
+
+    if (teacherError || !teacher) {
+      return res.status(404).json({ error: 'Teacher not found' });
+    }
+
+    // In a real implementation, you might want to reset the password or generate a new one
+    // For now, we'll return a placeholder (you might want to store initial passwords)
+    res.json({
+      email: teacher.email,
+      password: '[Password was set during creation]', // You might want to store this during teacher creation
+      login_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/teacher-login`,
+      teacherName: teacher.name
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching teacher credentials:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Reset teacher password
 router.post('/teachers/:teacherId/reset-password', async (req, res) => {
   try {
