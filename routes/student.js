@@ -617,7 +617,6 @@ router.get('/assignments', asyncHandler(async (req, res) => {
   }
 }));
 //submit assignment
-// NO multer import needed for base64 approach
 router.post('/submit-assignment', async (req, res) => {
   try {
     const { assignment_id, submission_text, audio_data } = req.body;
@@ -702,6 +701,44 @@ router.post('/submit-assignment', async (req, res) => {
   }
 });
 
+// Get student exams
+router.get('/exams', async (req, res) => {
+  try {
+    const studentId = req.user.id;
+    
+    // Get exams for the student's classes
+    const { data: exams, error } = await supabase
+      .from('exams')
+      .select(`
+        id,
+        title,
+        description,
+        subject,
+        date,
+        duration,
+        max_score,
+        status,
+        class:class_id (
+          title,
+          teacher:teacher_id (
+            name
+          )
+        )
+      `)
+      .eq('class_id.students_classes.student_id', studentId) // Exams for student's classes
+      .order('date', { ascending: true });
+
+    if (error) {
+      console.error('Error fetching exams:', error);
+      return res.status(400).json({ error: error.message });
+    }
+
+    res.json(exams || []);
+  } catch (error) {
+    console.error('Error fetching exams:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // Get payments
 router.get('/payments', asyncHandler(async (req, res) => {
