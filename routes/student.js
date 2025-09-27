@@ -617,7 +617,7 @@ router.get('/assignments', asyncHandler(async (req, res) => {
   }
 }));
 //submit assignment
-router.post('/submit-assignment', async (req, res) => {
+router.post('/submit-assignment', requireStudent, async (req, res) => {
   try {
     const { assignment_id, submission_text, audio_data } = req.body;
     const studentId = req.user.id;
