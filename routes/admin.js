@@ -456,12 +456,12 @@ router.get('/teachers/:teacherId/credentials', async (req, res) => {
       return res.status(404).json({ error: 'Teacher not found' });
     }
 
-    // In a real implementation, you might want to reset the password or generate a new one
+    //  reset the password or generate a new one
     // For now, we'll return a placeholder (you might want to store initial passwords)
     res.json({
       email: teacher.email,
       password: '[Password was set during creation]', // You might want to store this during teacher creation
-      login_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/teacher-login`,
+      login_url: `${process.env.FRONTEND_URL || 'https://madinaquran.vercel.app'}/teacher-login`,
       teacherName: teacher.name
     });
 
@@ -534,7 +534,7 @@ router.post('/teachers/:teacherId/reset-password', async (req, res) => {
       credentials: {
         email: teacher.email,
         password: newPassword,
-        login_url: `${process.env.APP_URL || 'http://localhost:3000'}/teacher/login`
+        login_url: `${process.env.APP_URL || 'https://madinaquran.vercel.app/'}/teacher-login`
       }
     });
 
