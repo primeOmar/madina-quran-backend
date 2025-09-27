@@ -617,16 +617,17 @@ router.get('/assignments', asyncHandler(async (req, res) => {
   }
 }));
 //submit assignment
+// NO multer import needed for base64 approach
 router.post('/submit-assignment', async (req, res) => {
   try {
-    const { assignment_id, submission_text, audio_data } = req.body; // audio_data as base64 string
+    const { assignment_id, submission_text, audio_data } = req.body;
     const studentId = req.user.id;
 
     if (!assignment_id) {
       return res.status(400).json({ error: 'Assignment ID is required' });
     }
 
-    // Check if assignment exists and is active
+    // Check if assignment exists
     const { data: assignment, error: assignmentError } = await supabase
       .from('assignments')
       .select('*')
@@ -637,18 +638,17 @@ router.post('/submit-assignment', async (req, res) => {
       return res.status(404).json({ error: 'Assignment not found' });
     }
 
-    // Check if assignment is still open
-    const dueDate = new Date(assignment.due_date);
-    const now = new Date();
-    const isLate = now > dueDate;
-
     let audioUrl = null;
 
-    // Handle audio data if provided (base64 encoded)
+    // Handle base64 audio data
     if (audio_data) {
       try {
-        // Convert base64 to buffer
-        const audioBuffer = Buffer.from(audio_data.split(',')[1], 'base64');
+        // Remove data:audio/wav;base64, prefix if present
+        const base64Data = audio_data.includes(',') 
+          ? audio_data.split(',')[1] 
+          : audio_data;
+        
+        const audioBuffer = Buffer.from(base64Data, 'base64');
         const fileName = `submissions/${assignment_id}/${studentId}_${Date.now()}.wav`;
         
         const { error: uploadError } = await supabase.storage
@@ -658,98 +658,42 @@ router.post('/submit-assignment', async (req, res) => {
             upsert: false
           });
 
-        if (uploadError) {
-          console.error('Error uploading audio file:', uploadError);
-          return res.status(500).json({ error: 'Failed to upload audio file' });
-        }
+        if (uploadError) throw uploadError;
 
-        // Get public URL
         const { data: publicUrlData } = supabase.storage
           .from('assignment-submissions')
           .getPublicUrl(fileName);
         
         audioUrl = publicUrlData.publicUrl;
       } catch (audioError) {
-        console.error('Error processing audio data:', audioError);
+        console.error('Error processing audio:', audioError);
         return res.status(400).json({ error: 'Invalid audio data' });
       }
     }
 
-    // Check if submission already exists
-    const { data: existingSubmission, error: checkError } = await supabase
-      .from('assignment_submissions')
-      .select('*')
-      .eq('assignment_id', assignment_id)
-      .eq('student_id', studentId)
-      .maybeSingle();
+    // Upsert submission (same as before)
+    const submissionData = {
+      assignment_id,
+      student_id: studentId,
+      submission_text: submission_text || null,
+      audio_url: audioUrl,
+      submitted_at: new Date().toISOString(),
+      status: 'submitted',
+      updated_at: new Date().toISOString()
+    };
 
-    let submissionData;
-    let submissionStatus = 'submitted';
-
-    if (isLate) {
-      submissionStatus = 'late';
-    }
-
-    if (existingSubmission) {
-      // Update existing submission
-      submissionData = {
-        submission_text: submission_text || existingSubmission.submission_text,
-        audio_url: audioUrl || existingSubmission.audio_url,
-        submitted_at: new Date().toISOString(),
-        status: submissionStatus,
-        updated_at: new Date().toISOString(),
-        score: null,
-        feedback: null,
-        graded_at: null
-      };
-    } else {
-      // Create new submission
-      submissionData = {
-        assignment_id,
-        student_id: studentId,
-        submission_text: submission_text || null,
-        audio_url: audioUrl,
-        submitted_at: new Date().toISOString(),
-        status: submissionStatus,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      };
-    }
-
-    // Upsert the submission
     const { data: submission, error: submissionError } = await supabase
       .from('assignment_submissions')
-      .upsert(submissionData, { 
-        onConflict: 'assignment_id,student_id'
-      })
-      .select(`
-        *,
-        assignments (
-          title,
-          description,
-          max_score
-        )
-      `)
+      .upsert(submissionData, { onConflict: 'assignment_id,student_id' })
+      .select()
       .single();
 
-    if (submissionError) {
-      console.error('Error creating submission:', submissionError);
-      return res.status(400).json({ error: submissionError.message });
-    }
+    if (submissionError) throw submissionError;
 
     res.json({
       success: true,
-      message: isLate ? 'Assignment submitted (marked as late)' : 'Assignment submitted successfully',
-      submission: {
-        id: submission.id,
-        assignment_id: submission.assignment_id,
-        status: submission.status,
-        submitted_at: submission.submitted_at,
-        audio_url: submission.audio_url,
-        submission_text: submission.submission_text,
-        is_late: isLate,
-        assignment_title: submission.assignments?.title
-      }
+      message: 'Assignment submitted successfully',
+      submission
     });
 
   } catch (error) {
@@ -757,6 +701,7 @@ router.post('/submit-assignment', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
 
 // Get payments
 router.get('/payments', asyncHandler(async (req, res) => {
