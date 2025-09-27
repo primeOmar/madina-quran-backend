@@ -1159,6 +1159,75 @@ router.get('/students', async (req, res) => {
   }
 });
 
+// In routes/admin.js - Add this endpoint
+router.post('/teachers/:teacherId/reset-password', async (req, res) => {
+  try {
+    const { teacherId } = req.params;
+    
+    if (!teacherId) {
+      return res.status(400).json({ error: 'Teacher ID is required' });
+    }
+
+    // Verify teacher exists
+    const { data: teacher, error: teacherError } = await supabase
+      .from('profiles')
+      .select('id, email, name, role')
+      .eq('id', teacherId)
+      .eq('role', 'teacher')
+      .single();
+
+    if (teacherError || !teacher) {
+      return res.status(404).json({ error: 'Teacher not found' });
+    }
+
+    // Generate new secure password
+    const newPassword = generateSecurePassword(12);
+
+    // Update auth user password
+    const { error: updateError } = await supabase.auth.admin.updateUserById(teacherId, {
+      password: newPassword
+    });
+
+    if (updateError) {
+      console.error('❌ Password update error:', updateError);
+      return res.status(400).json({ error: 'Failed to update password' });
+    }
+
+    // Log admin action
+    try {
+      await supabase
+        .from('admin_actions')
+        .insert([
+          {
+            admin_id: req.user.id,
+            action_type: 'reset_teacher_password',
+            target_type: 'profile',
+            target_id: teacherId,
+            details: { teacher_email: teacher.email },
+            performed_at: new Date().toISOString()
+          }
+        ]);
+    } catch (logError) {
+      console.warn('⚠️ Failed to log password reset action:', logError);
+    }
+
+    res.json({
+      success: true,
+      message: 'Teacher password reset successfully',
+      credentials: {
+        email: teacher.email,
+        password: newPassword,
+        login_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/teacher-login`,
+        teacherName: teacher.name
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error resetting teacher password:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Get students by teacher ID
 router.get('/students/teacher/:teacherId', async (req, res) => {
   try {
