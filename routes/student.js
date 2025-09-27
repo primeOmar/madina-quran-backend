@@ -616,6 +616,176 @@ router.get('/assignments', asyncHandler(async (req, res) => {
     }
   }
 }));
+//submit assignment
+router.post('/submit-assignment', upload.single('audio_submission'), async (req, res) => {
+  try {
+    const { assignment_id, submission_text } = req.body;
+    const studentId = req.user.id;
+
+    if (!assignment_id) {
+      return res.status(400).json({ error: 'Assignment ID is required' });
+    }
+
+    // Check if assignment exists and is active
+    const { data: assignment, error: assignmentError } = await supabase
+      .from('assignments')
+      .select('*')
+      .eq('id', assignment_id)
+      .single();
+
+    if (assignmentError || !assignment) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+
+    // Check if assignment is still open (not past due date for new submissions)
+    const dueDate = new Date(assignment.due_date);
+    const now = new Date();
+    const isLate = now > dueDate;
+
+    // Handle file upload if audio submission exists
+    let audioUrl = null;
+    if (req.file) {
+      // Convert buffer to blob for Supabase Storage
+      const fileBlob = new Blob([req.file.buffer], { type: 'audio/wav' });
+      const fileName = `submissions/${assignment_id}/${studentId}_${Date.now()}.wav`;
+      
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('assignment-submissions')
+        .upload(fileName, fileBlob, {
+          contentType: 'audio/wav',
+          upsert: false
+        });
+
+      if (uploadError) {
+        console.error('Error uploading audio file:', uploadError);
+        return res.status(500).json({ error: 'Failed to upload audio file' });
+      }
+
+      // Get public URL
+      const { data: publicUrlData } = supabase.storage
+        .from('assignment-submissions')
+        .getPublicUrl(fileName);
+      
+      audioUrl = publicUrlData.publicUrl;
+    }
+
+    // Check if submission already exists
+    const { data: existingSubmission, error: checkError } = await supabase
+      .from('assignment_submissions')
+      .select('*')
+      .eq('assignment_id', assignment_id)
+      .eq('student_id', studentId)
+      .maybeSingle();
+
+    let submissionData;
+    let submissionStatus = 'submitted';
+
+    // Determine status based on due date
+    if (isLate && !existingSubmission) {
+      submissionStatus = 'late';
+    } else if (isLate && existingSubmission) {
+      submissionStatus = 'late';
+    }
+
+    if (existingSubmission) {
+      // Update existing submission
+      submissionData = {
+        submission_text: submission_text || existingSubmission.submission_text,
+        audio_url: audioUrl || existingSubmission.audio_url,
+        submitted_at: new Date().toISOString(),
+        status: submissionStatus,
+        updated_at: new Date().toISOString(),
+        // Reset grading if resubmitting
+        score: null,
+        feedback: null,
+        graded_at: null
+      };
+    } else {
+      // Create new submission
+      submissionData = {
+        assignment_id,
+        student_id: studentId,
+        submission_text: submission_text || null,
+        audio_url: audioUrl,
+        submitted_at: new Date().toISOString(),
+        status: submissionStatus,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+    }
+
+    // Upsert the submission
+    const { data: submission, error: submissionError } = await supabase
+      .from('assignment_submissions')
+      .upsert(
+        submissionData,
+        { 
+          onConflict: 'assignment_id,student_id',
+          ignoreDuplicates: false
+        }
+      )
+      .select(`
+        *,
+        assignments (
+          title,
+          description,
+          max_score
+        ),
+        profiles:student_id (
+          name,
+          email
+        )
+      `)
+      .single();
+
+    if (submissionError) {
+      console.error('Error creating submission:', submissionError);
+      return res.status(400).json({ error: submissionError.message });
+    }
+
+    // Log the submission action
+    try {
+      await supabase
+        .from('admin_actions')
+        .insert({
+          admin_id: studentId, // Using student ID as actor
+          action_type: 'submit_assignment',
+          target_type: 'assignment_submission',
+          target_id: submission.id,
+          details: { 
+            assignment_id,
+            assignment_title: assignment.title,
+            has_audio: !!audioUrl,
+            has_text: !!submission_text,
+            status: submissionStatus
+          },
+          performed_at: new Date().toISOString()
+        });
+    } catch (logError) {
+      console.warn('Failed to log submission action:', logError);
+    }
+
+    res.json({
+      success: true,
+      message: isLate ? 'Assignment submitted (marked as late)' : 'Assignment submitted successfully',
+      submission: {
+        id: submission.id,
+        assignment_id: submission.assignment_id,
+        status: submission.status,
+        submitted_at: submission.submitted_at,
+        audio_url: submission.audio_url,
+        submission_text: submission.submission_text,
+        is_late: isLate,
+        assignment_title: submission.assignments?.title
+      }
+    });
+
+  } catch (error) {
+    console.error('Error submitting assignment:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Get payments
 router.get('/payments', asyncHandler(async (req, res) => {
   const tableNames = ['payments', 'fee_payments', 'student_payments', 'transactions'];
