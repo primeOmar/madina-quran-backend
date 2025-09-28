@@ -620,6 +620,8 @@ router.get('/assignments', asyncHandler(async (req, res) => {
 //submit assignment
 router.post('/submit-assignment', requireStudent, async (req, res) => {
   try {
+    console.log('🎯 Assignment submission by student:', req.user.id, req.user.name);
+
     const { assignment_id, submission_text, audio_data } = req.body;
     const studentId = req.user.id;
 
@@ -643,7 +645,6 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
     // Handle base64 audio data
     if (audio_data) {
       try {
-        // Remove data:audio/wav;base64, prefix if present
         const base64Data = audio_data.includes(',') 
           ? audio_data.split(',')[1] 
           : audio_data;
@@ -658,20 +659,24 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
             upsert: false
           });
 
-        if (uploadError) throw uploadError;
+        if (uploadError) {
+          console.error('Storage upload error:', uploadError);
+          throw uploadError;
+        }
 
         const { data: publicUrlData } = supabase.storage
           .from('assignment-submissions')
           .getPublicUrl(fileName);
         
         audioUrl = publicUrlData.publicUrl;
+        console.log('✅ Audio uploaded successfully:', audioUrl);
       } catch (audioError) {
         console.error('Error processing audio:', audioError);
         return res.status(400).json({ error: 'Invalid audio data' });
       }
     }
 
-    // Upsert submission (same as before)
+    // Upsert submission
     const submissionData = {
       assignment_id,
       student_id: studentId,
@@ -682,13 +687,25 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
       updated_at: new Date().toISOString()
     };
 
+    console.log('💾 Saving submission data:', {
+      assignment_id,
+      student_id: studentId,
+      has_text: !!submission_text,
+      has_audio: !!audioUrl
+    });
+
     const { data: submission, error: submissionError } = await supabase
       .from('assignment_submissions')
       .upsert(submissionData, { onConflict: 'assignment_id,student_id' })
       .select()
       .single();
 
-    if (submissionError) throw submissionError;
+    if (submissionError) {
+      console.error('❌ Database error:', submissionError);
+      throw submissionError;
+    }
+
+    console.log('✅ Assignment submitted successfully:', submission.id);
 
     res.json({
       success: true,
@@ -697,12 +714,10 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error submitting assignment:', error);
+    console.error('❌ Error submitting assignment:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
-});
-
-// Get student exams
+});// Get student exams
 router.get('/exams', async (req, res) => {
   try {
     const studentId = req.user.id;
