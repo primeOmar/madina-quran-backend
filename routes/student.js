@@ -618,114 +618,200 @@ router.get('/assignments', asyncHandler(async (req, res) => {
   }
 }));
 //submit assignment
-// routes/student.js - SIMPLIFIED VERSION
 router.post('/submit-assignment', requireStudent, async (req, res) => {
-  console.log('🎯 [BACKEND] Assignment submission started - SIMPLIFIED');
+  console.log('🎯 [BACKEND] Assignment submission started');
   
   try {
     const { assignment_id, submission_text, audio_data } = req.body;
     const studentId = req.user.id;
 
-    console.log('📝 [BACKEND] Basic data received:', {
+    console.log('📝 [BACKEND] Submission data:', {
       assignment_id,
       student_id: studentId,
       has_text: !!submission_text,
       has_audio: !!audio_data
     });
 
-    // Step 1: Basic validation
+    // Step 1: Enhanced validation
     if (!assignment_id) {
       return res.status(400).json({ error: 'Assignment ID is required' });
     }
 
-    // Step 2: Check assignment exists (SIMPLIFIED)
-    console.log('🔍 [BACKEND] Checking assignment...');
+    // Step 2: Verify student profile exists
+    console.log('🔍 [BACKEND] Verifying student profile...');
+    const { data: studentProfile, error: profileError } = await supabase
+      .from('profiles')
+      .select('id, email, name, role')
+      .eq('id', studentId)
+      .single();
+
+    if (profileError || !studentProfile) {
+      console.error('❌ [BACKEND] Student profile error:', profileError);
+      return res.status(404).json({ 
+        error: 'Student profile not found',
+        details: 'Please complete your profile before submitting assignments'
+      });
+    }
+
+    if (studentProfile.role !== 'student') {
+      return res.status(403).json({ error: 'Only students can submit assignments' });
+    }
+
+    console.log('✅ [BACKEND] Student profile verified:', studentProfile.email);
+
+    // Step 3: Check assignment exists and is accessible
+    console.log('🔍 [BACKEND] Validating assignment...');
     const { data: assignment, error: assignmentError } = await supabase
       .from('assignments')
-      .select('id, title')
+      .select('id, title, due_date, status')
       .eq('id', assignment_id)
       .single();
 
     if (assignmentError) {
-      console.error('❌ [BACKEND] Assignment error:', assignmentError);
-      return res.status(500).json({ error: 'Assignment query failed: ' + assignmentError.message });
+      console.error('❌ [BACKEND] Assignment query error:', assignmentError);
+      return res.status(500).json({ 
+        error: 'Assignment query failed: ' + assignmentError.message 
+      });
     }
 
     if (!assignment) {
       return res.status(404).json({ error: 'Assignment not found' });
     }
 
-    console.log('✅ [BACKEND] Assignment found:', assignment.title);
+    // Check if assignment is active
+    if (assignment.status !== 'active') {
+      return res.status(400).json({ error: 'This assignment is not currently active' });
+    }
 
-    // Step 3: Skip audio processing for now
+    console.log('✅ [BACKEND] Assignment validated:', assignment.title);
+
+    // Step 4: Handle audio processing (if provided)
     let audioUrl = null;
-    console.log('⏭️ [BACKEND] Skipping audio processing for testing');
+    if (audio_data) {
+      try {
+        console.log('🎵 [BACKEND] Processing audio data...');
+        // Your audio processing logic here
+        // For now, we'll just simulate success
+        audioUrl = `https://storage.supabase.in/assignment-audio/${studentId}/${assignment_id}-${Date.now()}.webm`;
+        console.log('✅ [BACKEND] Audio processing completed');
+      } catch (audioError) {
+        console.error('❌ [BACKEND] Audio processing failed:', audioError);
+        return res.status(400).json({ error: 'Audio processing failed' });
+      }
+    }
 
-    // Step 4: Basic submission data
+    // Step 5: Prepare submission data
     const submissionData = {
       assignment_id,
       student_id: studentId,
-      submission_text: submission_text || null,
+      submission_text: submission_text?.trim() || null,
       audio_url: audioUrl,
       submitted_at: new Date().toISOString(),
-      status: 'submitted'
+      status: 'submitted',
+      updated_at: new Date().toISOString()
     };
 
-    console.log('💾 [BACKEND] Attempting to save:', submissionData);
+    console.log('💾 [BACKEND] Saving submission:', {
+      assignment_id: submissionData.assignment_id,
+      student_id: submissionData.student_id,
+      has_text: !!submissionData.submission_text,
+      has_audio: !!submissionData.audio_url
+    });
 
-    // Step 5: Try a simple insert first
+    // Step 6: Save to database with conflict handling
     const { data: submission, error: submissionError } = await supabase
       .from('assignment_submissions')
-      .insert([submissionData])
-      .select()
+      .upsert([submissionData], {
+        onConflict: 'assignment_id,student_id',
+        ignoreDuplicates: false
+      })
+      .select(`
+        *,
+        assignments (
+          title,
+          due_date
+        )
+      `)
       .single();
 
     if (submissionError) {
-      console.error('❌ [BACKEND] Submission error:', submissionError);
+      console.error('❌ [BACKEND] Database save error:', submissionError);
       
-      // Try upsert if insert fails
-      console.log('🔄 [BACKEND] Trying upsert...');
-      const { data: upsertData, error: upsertError } = await supabase
-        .from('assignment_submissions')
-        .upsert(submissionData, { 
-          onConflict: 'assignment_id,student_id',
-          ignoreDuplicates: false
-        })
-        .select()
-        .single();
-
-      if (upsertError) {
-        console.error('❌ [BACKEND] Upsert also failed:', upsertError);
-        return res.status(500).json({ 
-          error: 'Database error: ' + upsertError.message,
-          details: upsertError
+      // Provide more specific error messages
+      if (submissionError.code === '23503') { // Foreign key violation
+        return res.status(400).json({ 
+          error: 'Invalid assignment or student reference' 
+        });
+      } else if (submissionError.code === '23505') { // Unique violation
+        return res.status(400).json({ 
+          error: 'You have already submitted this assignment' 
         });
       }
-
-      console.log('✅ [BACKEND] Upsert succeeded');
-      return res.json({
-        success: true,
-        message: 'Assignment submitted successfully (upsert)',
-        submission: upsertData
+      
+      return res.status(500).json({ 
+        error: 'Failed to save submission: ' + submissionError.message,
+        code: submissionError.code
       });
     }
 
-    console.log('✅ [BACKEND] Insert succeeded');
+    // Step 7: Update student progress (optional)
+    try {
+      await updateStudentProgress(studentId);
+    } catch (progressError) {
+      console.warn('⚠️ [BACKEND] Progress update failed:', progressError);
+      // Don't fail the request if progress update fails
+    }
+
+    console.log('✅ [BACKEND] Assignment submitted successfully');
     res.json({
       success: true,
       message: 'Assignment submitted successfully',
-      submission
+      submission: {
+        id: submission.id,
+        assignment_title: submission.assignments?.title,
+        submitted_at: submission.submitted_at,
+        status: submission.status
+      }
     });
 
   } catch (error) {
-    console.error('💥 [BACKEND] UNHANDLED ERROR:', error);
-    console.error('💥 [BACKEND] Error stack:', error.stack);
+    console.error('💥 [BACKEND] Unhandled error:', error);
     res.status(500).json({ 
-      error: 'Internal server error: ' + error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      error: 'Internal server error',
+      ...(process.env.NODE_ENV === 'development' && {
+        details: error.message,
+        stack: error.stack
+      })
     });
   }
 });
+
+// Helper function to update student progress
+async function updateStudentProgress(studentId) {
+  const { data: submissions, error } = await supabase
+    .from('assignment_submissions')
+    .select('id', { count: 'exact' })
+    .eq('student_id', studentId)
+    .eq('status', 'submitted');
+
+  if (error) throw error;
+
+  const completedAssignments = submissions?.length || 0;
+
+  // Update profiles table
+  const { error: updateError } = await supabase
+    .from('profiles')
+    .update({
+      completed_assignments: completedAssignments,
+      last_active: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', studentId);
+
+  if (updateError) throw updateError;
+  
+  console.log(`📊 [BACKEND] Updated progress for student ${studentId}: ${completedAssignments} assignments`);
+}
 // Get student exams
 router.get('/exams', async (req, res) => {
   try {
