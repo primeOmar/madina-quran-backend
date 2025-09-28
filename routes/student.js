@@ -4,6 +4,7 @@
 import express from 'express';
 import { supabase, clearCache, getCache, setCache } from '../server.js';
 import { requireAuth } from '../middleware/auth.js';
+import { requireStudent } from '../middleware/auth.js';
 import { sanitizeInput } from '../utils/helpers.js';
 
 const router = express.Router();
