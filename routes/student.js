@@ -623,11 +623,14 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
   
   try {
     const { assignment_id, submission_text, audio_data } = req.body;
-    const studentId = req.user.id;
+    
+    // Use the verified student profile from middleware
+    const studentId = req.studentProfile.id;
 
     console.log('📝 [BACKEND] Submission data:', {
       assignment_id,
       student_id: studentId,
+      student_email: req.studentProfile.email,
       has_text: !!submission_text,
       has_audio: !!audio_data
     });
@@ -637,38 +640,21 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
       return res.status(400).json({ error: 'Assignment ID is required' });
     }
 
-    // Step 2: Verify student profile exists
-    console.log('🔍 [BACKEND] Verifying student profile...');
-    const { data: studentProfile, error: profileError } = await supabase
-      .from('profiles')
-      .select('id, email, name, role')
-      .eq('id', studentId)
-      .single();
-
-    if (profileError || !studentProfile) {
-      console.error('❌ [BACKEND] Student profile error:', profileError);
-      return res.status(404).json({ 
-        error: 'Student profile not found',
-        details: 'Please complete your profile before submitting assignments'
-      });
-    }
-
-    if (studentProfile.role !== 'student') {
-      return res.status(403).json({ error: 'Only students can submit assignments' });
-    }
-
-    console.log('✅ [BACKEND] Student profile verified:', studentProfile.email);
-
-    // Step 3: Check assignment exists and is accessible
+    // Step 2: Check assignment exists and is accessible
     console.log('🔍 [BACKEND] Validating assignment...');
     const { data: assignment, error: assignmentError } = await supabase
       .from('assignments')
-      .select('id, title, due_date, status')
+      .select('id, title, due_date, status, description')
       .eq('id', assignment_id)
       .single();
 
     if (assignmentError) {
       console.error('❌ [BACKEND] Assignment query error:', assignmentError);
+      
+      if (assignmentError.code === 'PGRST116') {
+        return res.status(404).json({ error: 'Assignment not found' });
+      }
+      
       return res.status(500).json({ 
         error: 'Assignment query failed: ' + assignmentError.message 
       });
@@ -685,13 +671,12 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
 
     console.log('✅ [BACKEND] Assignment validated:', assignment.title);
 
-    // Step 4: Handle audio processing (if provided)
+    // Step 3: Handle audio processing (if provided)
     let audioUrl = null;
     if (audio_data) {
       try {
         console.log('🎵 [BACKEND] Processing audio data...');
         // Your audio processing logic here
-        // For now, we'll just simulate success
         audioUrl = `https://storage.supabase.in/assignment-audio/${studentId}/${assignment_id}-${Date.now()}.webm`;
         console.log('✅ [BACKEND] Audio processing completed');
       } catch (audioError) {
@@ -700,7 +685,7 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
       }
     }
 
-    // Step 5: Prepare submission data
+    // Step 4: Prepare submission data
     const submissionData = {
       assignment_id,
       student_id: studentId,
@@ -711,20 +696,12 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
       updated_at: new Date().toISOString()
     };
 
-    console.log('💾 [BACKEND] Saving submission:', {
-      assignment_id: submissionData.assignment_id,
-      student_id: submissionData.student_id,
-      has_text: !!submissionData.submission_text,
-      has_audio: !!submissionData.audio_url
-    });
+    console.log('💾 [BACKEND] Saving submission data...');
 
-    // Step 6: Save to database with conflict handling
+    // Step 5: Save to database
     const { data: submission, error: submissionError } = await supabase
       .from('assignment_submissions')
-      .upsert([submissionData], {
-        onConflict: 'assignment_id,student_id',
-        ignoreDuplicates: false
-      })
+      .insert([submissionData])
       .select(`
         *,
         assignments (
@@ -737,14 +714,16 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
     if (submissionError) {
       console.error('❌ [BACKEND] Database save error:', submissionError);
       
-      // Provide more specific error messages
-      if (submissionError.code === '23503') { // Foreign key violation
-        return res.status(400).json({ 
-          error: 'Invalid assignment or student reference' 
-        });
-      } else if (submissionError.code === '23505') { // Unique violation
+      // Handle specific error cases
+      if (submissionError.code === '23505') { // Unique violation
         return res.status(400).json({ 
           error: 'You have already submitted this assignment' 
+        });
+      }
+      
+      if (submissionError.code === '23503') { // Foreign key violation
+        return res.status(400).json({ 
+          error: 'Invalid assignment reference' 
         });
       }
       
@@ -754,15 +733,17 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
       });
     }
 
-    // Step 7: Update student progress (optional)
+    console.log('✅ [BACKEND] Assignment submitted successfully');
+
+    // Step 6: Update student progress
     try {
       await updateStudentProgress(studentId);
+      console.log('📊 [BACKEND] Student progress updated');
     } catch (progressError) {
       console.warn('⚠️ [BACKEND] Progress update failed:', progressError);
       // Don't fail the request if progress update fails
     }
 
-    console.log('✅ [BACKEND] Assignment submitted successfully');
     res.json({
       success: true,
       message: 'Assignment submitted successfully',
@@ -779,8 +760,7 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
     res.status(500).json({ 
       error: 'Internal server error',
       ...(process.env.NODE_ENV === 'development' && {
-        details: error.message,
-        stack: error.stack
+        details: error.message
       })
     });
   }
@@ -788,6 +768,7 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
 
 // Helper function to update student progress
 async function updateStudentProgress(studentId) {
+  // Count submitted assignments
   const { data: submissions, error } = await supabase
     .from('assignment_submissions')
     .select('id', { count: 'exact' })
@@ -809,8 +790,6 @@ async function updateStudentProgress(studentId) {
     .eq('id', studentId);
 
   if (updateError) throw updateError;
-  
-  console.log(`📊 [BACKEND] Updated progress for student ${studentId}: ${completedAssignments} assignments`);
 }
 // Get student exams
 router.get('/exams', async (req, res) => {
