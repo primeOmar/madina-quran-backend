@@ -119,60 +119,77 @@ const requireTeacher = async (req, res, next) => {
 // Student middleware: Verifies if the user is a student
 const requireStudent = async (req, res, next) => {
   try {
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    
-    if (!token) {
-      console.log('❌ No token provided for student access');
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-
     console.log('🔐 Verifying student token...');
-
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
     
-    if (authError || !user) {
-      console.error('❌ Student token verification failed:', authError);
-      return res.status(401).json({ error: 'Invalid token' });
+    // Get the user from the authenticated request
+    const user = req.user;
+    
+    if (!user) {
+      return res.status(401).json({ error: 'Authentication required' });
     }
 
     console.log('✅ Student user authenticated:', user.email);
 
+    // Check if user has a student profile
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
-      .select('id, name, email, role, status, student_id, class_id')
-      .eq('id', user.id)
+      .select('id, email, role, status, teacher_id')
+      .eq('id', user.id)  // Use 'id' not 'student_id'
       .single();
 
-    if (profileError || !profile) {
-      console.error('❌ Student profile not found:', profileError);
-      return res.status(404).json({ error: 'Student profile not found' });
+    if (profileError) {
+      console.error('❌ Student profile query error:', profileError);
+      
+      // Handle specific "no rows" error
+      if (profileError.code === 'PGRST116') {
+        return res.status(404).json({ 
+          error: 'Student profile not found. Please complete your profile setup.' 
+        });
+      }
+      
+      return res.status(500).json({ 
+        error: 'Database error checking student profile' 
+      });
     }
 
+    if (!profile) {
+      return res.status(404).json({ 
+        error: 'Student profile not found. Please complete your profile setup.' 
+      });
+    }
+
+    // Check if profile has student role
     if (profile.role !== 'student') {
-      console.error('❌ Access denied - not a student:', profile.role);
-      return res.status(403).json({ error: 'Student privileges required' });
+      return res.status(403).json({ 
+        error: 'Access denied. Student role required.' 
+      });
     }
 
+    // Check if profile is active
     if (profile.status !== 'active') {
-      console.log('❌ Student account is not active:', profile.status);
-      return res.status(403).json({ error: 'Student account is not active' });
+      return res.status(403).json({ 
+        error: 'Account is not active. Please contact administrator.' 
+      });
     }
 
-    req.user = {
-      id: user.id,
-      email: user.email,
-      ...profile
-    };
+    console.log('✅ Student profile verified:', {
+      id: profile.id,
+      email: profile.email,
+      role: profile.role,
+      status: profile.status
+    });
 
-    console.log(`✅ Student verified: ${profile.name}, Student ID: ${profile.student_id}`);
+    // Attach profile to request for use in routes
+    req.studentProfile = profile;
     next();
 
   } catch (error) {
-    console.error('❌ Student middleware error:', error);
-    res.status(500).json({ error: 'Student verification failed' });
+    console.error('💥 requireStudent middleware error:', error);
+    return res.status(500).json({ 
+      error: 'Internal server error in authentication' 
+    });
   }
 };
-
 // Student with active enrollment middleware: Verifies student has active class enrollment
 const requireEnrolledStudent = async (req, res, next) => {
   try {
