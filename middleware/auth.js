@@ -315,6 +315,3 @@ export {
   requireEnrolledStudent, 
   requireStudentClassAccess 
 };
-
-
-export { requireAdmin, requireAuth, requireTeacher };
