@@ -623,14 +623,11 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
   
   try {
     const { assignment_id, submission_text, audio_data } = req.body;
-    
-    // Use the verified student profile from middleware
     const studentId = req.studentProfile.id;
 
     console.log('📝 [BACKEND] Submission data:', {
       assignment_id,
       student_id: studentId,
-      student_email: req.studentProfile.email,
       has_text: !!submission_text,
       has_audio: !!audio_data
     });
@@ -640,7 +637,7 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
       return res.status(400).json({ error: 'Assignment ID is required' });
     }
 
-    // Step 2: Check assignment exists and is accessible
+    // Step 2: Check assignment exists
     console.log('🔍 [BACKEND] Validating assignment...');
     const { data: assignment, error: assignmentError } = await supabase
       .from('assignments')
@@ -650,11 +647,9 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
 
     if (assignmentError) {
       console.error('❌ [BACKEND] Assignment query error:', assignmentError);
-      
       if (assignmentError.code === 'PGRST116') {
         return res.status(404).json({ error: 'Assignment not found' });
       }
-      
       return res.status(500).json({ 
         error: 'Assignment query failed: ' + assignmentError.message 
       });
@@ -664,14 +659,30 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
       return res.status(404).json({ error: 'Assignment not found' });
     }
 
-    // Check if assignment is active
-    if (assignment.status !== 'active') {
-      return res.status(400).json({ error: 'This assignment is not currently active' });
+    console.log('📋 [BACKEND] Assignment details:', {
+      id: assignment.id,
+      title: assignment.title,
+      status: assignment.status,
+      due_date: assignment.due_date
+    });
+
+    // Step 3: Fix the status check - accept both 'active' and 'assigned'
+    const allowedStatuses = ['active', 'assigned'];
+    if (!allowedStatuses.includes(assignment.status)) {
+      return res.status(400).json({ 
+        error: `This assignment is ${assignment.status} and cannot be submitted. Only 'active' or 'assigned' assignments can be submitted.` 
+      });
     }
 
-    console.log('✅ [BACKEND] Assignment validated:', assignment.title);
+    // Step 4: Check due date (optional)
+    if (assignment.due_date && new Date(assignment.due_date) < new Date()) {
+      console.log('⚠️ [BACKEND] Assignment due date has passed, but allowing submission');
+      // You can choose to block or allow late submissions
+    }
 
-    // Step 3: Handle audio processing (if provided)
+    console.log('✅ [BACKEND] Assignment validation passed');
+
+    // Step 5: Handle audio processing (if provided)
     let audioUrl = null;
     if (audio_data) {
       try {
@@ -685,7 +696,7 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
       }
     }
 
-    // Step 4: Prepare submission data
+    // Step 6: Prepare submission data
     const submissionData = {
       assignment_id,
       student_id: studentId,
@@ -696,9 +707,9 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
       updated_at: new Date().toISOString()
     };
 
-    console.log('💾 [BACKEND] Saving submission data...');
+    console.log('💾 [BACKEND] Saving submission...');
 
-    // Step 5: Save to database
+    // Step 7: Save to database
     const { data: submission, error: submissionError } = await supabase
       .from('assignment_submissions')
       .insert([submissionData])
@@ -714,34 +725,25 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
     if (submissionError) {
       console.error('❌ [BACKEND] Database save error:', submissionError);
       
-      // Handle specific error cases
-      if (submissionError.code === '23505') { // Unique violation
+      if (submissionError.code === '23505') {
         return res.status(400).json({ 
           error: 'You have already submitted this assignment' 
         });
       }
       
-      if (submissionError.code === '23503') { // Foreign key violation
-        return res.status(400).json({ 
-          error: 'Invalid assignment reference' 
-        });
-      }
-      
       return res.status(500).json({ 
-        error: 'Failed to save submission: ' + submissionError.message,
-        code: submissionError.code
+        error: 'Failed to save submission: ' + submissionError.message 
       });
     }
 
     console.log('✅ [BACKEND] Assignment submitted successfully');
 
-    // Step 6: Update student progress
+    // Step 8: Update student progress
     try {
       await updateStudentProgress(studentId);
       console.log('📊 [BACKEND] Student progress updated');
     } catch (progressError) {
       console.warn('⚠️ [BACKEND] Progress update failed:', progressError);
-      // Don't fail the request if progress update fails
     }
 
     res.json({
@@ -765,32 +767,6 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
     });
   }
 });
-
-// Helper function to update student progress
-async function updateStudentProgress(studentId) {
-  // Count submitted assignments
-  const { data: submissions, error } = await supabase
-    .from('assignment_submissions')
-    .select('id', { count: 'exact' })
-    .eq('student_id', studentId)
-    .eq('status', 'submitted');
-
-  if (error) throw error;
-
-  const completedAssignments = submissions?.length || 0;
-
-  // Update profiles table
-  const { error: updateError } = await supabase
-    .from('profiles')
-    .update({
-      completed_assignments: completedAssignments,
-      last_active: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    })
-    .eq('id', studentId);
-
-  if (updateError) throw updateError;
-}
 // Get student exams
 router.get('/exams', async (req, res) => {
   try {
