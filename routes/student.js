@@ -622,14 +622,14 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
   console.log('🎯 [BACKEND] Assignment submission started');
   
   try {
-    const { assignment_id, submission_text, audio_data } = req.body;
+     const { assignment_id, submission_text, audio_url } = req.body;
     const studentId = req.studentProfile.id;
 
     console.log('📝 [BACKEND] Submission data:', {
       assignment_id,
       student_id: studentId,
       has_text: !!submission_text,
-      has_audio: !!audio_data
+     has_audio: !!audio_url
     });
 
     // Step 1: Enhanced validation
@@ -683,29 +683,19 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
     console.log('✅ [BACKEND] Assignment validation passed');
 
     // Step 5: Handle audio processing (if provided)
-    let audioUrl = null;
-    if (audio_data) {
-      try {
-        console.log('🎵 [BACKEND] Processing audio data...');
-        // Your audio processing logic here
-        audioUrl = `https://storage.supabase.in/assignment-audio/${studentId}/${assignment_id}-${Date.now()}.webm`;
-        console.log('✅ [BACKEND] Audio processing completed');
-      } catch (audioError) {
-        console.error('❌ [BACKEND] Audio processing failed:', audioError);
-        return res.status(400).json({ error: 'Audio processing failed' });
-      }
-    }
+   console.log('🎵 [BACKEND] Using provided audio URL:', audio_url);
 
     // Step 6: Prepare submission data
     const submissionData = {
       assignment_id,
       student_id: studentId,
       submission_text: submission_text?.trim() || null,
-      audio_url: audioUrl,
+      audio_url: audio_url,  // Store the URL directly
       submitted_at: new Date().toISOString(),
       status: 'submitted',
       updated_at: new Date().toISOString()
     };
+
 
     console.log('💾 [BACKEND] Saving submission...');
 
@@ -757,7 +747,7 @@ router.post('/submit-assignment', requireStudent, async (req, res) => {
       }
     });
 
-  } catch (error) {
+ } catch (error) {
     console.error('💥 [BACKEND] Unhandled error:', error);
     res.status(500).json({ 
       error: 'Internal server error',
