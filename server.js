@@ -14,6 +14,7 @@ import morgan from 'morgan';
 import adminRoutes from './routes/admin.js';
 import teacherRoutes from './routes/teacher.js';
 import studentRoutes from './routes/student.js';
+import agoraRoutes from './routes/agora.js';
 
 // Load environment variables from .env file
 dotenv.config();
