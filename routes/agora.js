@@ -1,4 +1,4 @@
-// routes/agora.js - Optimized for reliability
+// routes/agora.js - FIXED VERSION
 const express = require('express');
 const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
 
@@ -22,12 +22,26 @@ router.post('/generate-token', async (req, res) => {
     const appId = process.env.AGORA_APP_ID;
     const appCertificate = process.env.AGORA_APP_CERTIFICATE;
     
-    if (!appId || !appCertificate) {
+    // ✅ BETTER VALIDATION - Check if environment variables exist
+    if (!appId || appId === '""' || appId === "''") {
+      console.error('❌ AGORA_APP_ID is missing or empty:', appId);
       return res.status(500).json({ 
         success: false,
-        error: 'Video service temporarily unavailable'
+        error: 'Video service configuration missing',
+        isFallback: true
       });
     }
+
+    if (!appCertificate || appCertificate === '""' || appCertificate === "''") {
+      console.error('❌ AGORA_APP_CERTIFICATE is missing or empty');
+      return res.status(500).json({ 
+        success: false,
+        error: 'Video service certificate missing',
+        isFallback: true
+      });
+    }
+
+    console.log('🔐 Generating token with App ID:', appId ? '***' + appId.slice(-4) : 'UNDEFINED');
 
     // Fast token generation
     const expirationTime = 3600; // 1 hour
@@ -45,13 +59,15 @@ router.post('/generate-token', async (req, res) => {
       privilegeExpiredTs
     );
 
+    // ✅ CRITICAL FIX: Return the exact structure frontend expects
     res.json({
       success: true,
       token,
-      appId,
+      appId, // ✅ This was missing!
       channelName,
       uid: uid || 0,
-      expiresAt: privilegeExpiredTs
+      expiresAt: privilegeExpiredTs,
+      isFallback: false // ✅ Explicitly set fallback mode
     });
 
   } catch (error) {
@@ -59,20 +75,43 @@ router.post('/generate-token', async (req, res) => {
     res.status(500).json({ 
       success: false,
       error: 'Failed to generate token',
-      fallback: true // Signal frontend to use fallback
+      isFallback: true // ✅ Signal frontend to use fallback
     });
   }
 });
 
-// Health check for video service
+// Health check for video service - ENHANCED
 router.get('/health', (req, res) => {
   const appId = process.env.AGORA_APP_ID;
   const appCertificate = process.env.AGORA_APP_CERTIFICATE;
   
+  const hasAppId = !!(appId && appId !== '""' && appId !== "''");
+  const hasCertificate = !!(appCertificate && appCertificate !== '""' && appCertificate !== "''");
+  
   res.json({
-    status: 'healthy',
-    videoEnabled: !!(appId && appCertificate),
-    timestamp: new Date().toISOString()
+    status: hasAppId && hasCertificate ? 'healthy' : 'unhealthy',
+    videoEnabled: hasAppId && hasCertificate,
+    appIdConfigured: hasAppId,
+    appCertificateConfigured: hasCertificate,
+    timestamp: new Date().toISOString(),
+    // For debugging - don't expose full values in production
+    appIdPreview: hasAppId ? '***' + appId.slice(-4) : 'missing',
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+// Debug endpoint to check environment variables (remove in production)
+router.get('/debug-config', (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ error: 'Not available in production' });
+  }
+  
+  res.json({
+    AGORA_APP_ID: process.env.AGORA_APP_ID ? '***' + process.env.AGORA_APP_ID.slice(-4) : 'MISSING',
+    AGORA_APP_CERTIFICATE: process.env.AGORA_APP_CERTIFICATE ? '***' + process.env.AGORA_APP_CERTIFICATE.slice(-4) : 'MISSING',
+    NODE_ENV: process.env.NODE_ENV,
+    hasAppId: !!(process.env.AGORA_APP_ID && process.env.AGORA_APP_ID !== '""'),
+    hasCertificate: !!(process.env.AGORA_APP_CERTIFICATE && process.env.AGORA_APP_CERTIFICATE !== '""')
   });
 });
 
