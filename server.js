@@ -299,7 +299,7 @@ app.use((req, res, next) => {
 app.use('/api/student', studentRoutes);
 app.use('/api/teacher', teacherRoutes);
 app.use('/api/admin', adminRoutes);
-
+app.use('/api/agora', agoraRoutes);
 // General utility endpoint for generating Agora token
 app.post('/api/generate-agora-token', async (req, res) => {
   try {
