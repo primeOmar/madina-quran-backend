@@ -1,6 +1,8 @@
+
 import express from 'express';
-import { RtcTokenBuilder, RtcRole } from 'agora-access-token';
-import { supabase } from '../server.js'; // Use import
+import pkg from 'agora-access-token'; 
+const { RtcTokenBuilder, RtcRole } = pkg; 
+import { supabase } from '../server.js';
 
 const router = express.Router();
 
@@ -63,11 +65,11 @@ router.post('/generate-token', async (req, res) => {
     res.json({
       success: true,
       token,
-      appId, // ✅ This was missing!
+      appId, 
       channelName,
       uid: uid || 0,
       expiresAt: privilegeExpiredTs,
-      isFallback: false // ✅ Explicitly set fallback mode
+      isFallback: false 
     });
 
   } catch (error) {
@@ -75,7 +77,7 @@ router.post('/generate-token', async (req, res) => {
     res.status(500).json({ 
       success: false,
       error: 'Failed to generate token',
-      isFallback: true // ✅ Signal frontend to use fallback
+      isFallback: true 
     });
   }
 });
@@ -152,5 +154,4 @@ router.get('/debug-config', (req, res) => {
   });
 });
 
-// FIXED: Use ES module export
 export default router;
