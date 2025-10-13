@@ -10,4 +10,7 @@
     "agora-access-token": "^2.0.4",
     "morgan": "^1.10.0"
   }
+  {
+  "type": "module"
+}
 }
