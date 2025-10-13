@@ -1,4 +1,3 @@
-// routes/agora.js - FIXED VERSION (ES Modules)
 import express from 'express';
 import { RtcTokenBuilder, RtcRole } from 'agora-access-token';
 import { supabase } from '../server.js'; // Use import
