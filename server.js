@@ -15,7 +15,7 @@ import adminRoutes from './routes/admin.js';
 import teacherRoutes from './routes/teacher.js';
 import studentRoutes from './routes/student.js';
 import agoraRoutes from './routes/agora.js';
-
+import publicVideoRoutes from './routes/public-video.js';
 // Load environment variables from .env file
 dotenv.config();
 
@@ -300,6 +300,7 @@ app.use('/api/student', studentRoutes);
 app.use('/api/teacher', teacherRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/agora', agoraRoutes);
+app.use('/api/public-video', publicVideoRoutes);
 // General utility endpoint for generating Agora token
 app.post('/api/generate-agora-token', async (req, res) => {
   try {
