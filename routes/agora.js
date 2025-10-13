@@ -80,6 +80,26 @@ router.post('/generate-token', async (req, res) => {
   }
 });
 
+router.post('/end', async (req, res) => {
+  try {
+    const { meeting_id } = req.body;
+    
+    // Update session status in database
+    await supabase
+      .from('video_sessions')
+      .update({ 
+        status: 'ended', 
+        ended_at: new Date().toISOString() 
+      })
+      .eq('meeting_id', meeting_id);
+
+    res.json({ success: true, message: 'Session ended' });
+  } catch (error) {
+    console.error('End session error:', error);
+    res.status(500).json({ error: 'Failed to end session' });
+  }
+});
+
 // Health check for video service - ENHANCED
 router.get('/health', (req, res) => {
   const appId = process.env.AGORA_APP_ID;
