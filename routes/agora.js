@@ -1,4 +1,4 @@
-// routes/agora.js - FIXED VERSION
+import { supabase } from '../server.js';
 const express = require('express');
 const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
 
