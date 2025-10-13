@@ -1,6 +1,7 @@
-import { supabase } from '../server.js';
-const express = require('express');
-const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
+// routes/agora.js - FIXED VERSION (ES Modules)
+import express from 'express';
+import { RtcTokenBuilder, RtcRole } from 'agora-access-token';
+import { supabase } from '../server.js'; // Use import
 
 const router = express.Router();
 
@@ -84,8 +85,14 @@ router.post('/end', async (req, res) => {
   try {
     const { meeting_id } = req.body;
     
+    if (!meeting_id) {
+      return res.status(400).json({ error: 'Meeting ID is required' });
+    }
+
+    console.log('🛑 Ending video session in database:', meeting_id);
+
     // Update session status in database
-    await supabase
+    const { data, error } = await supabase
       .from('video_sessions')
       .update({ 
         status: 'ended', 
@@ -93,9 +100,20 @@ router.post('/end', async (req, res) => {
       })
       .eq('meeting_id', meeting_id);
 
-    res.json({ success: true, message: 'Session ended' });
+    if (error) {
+      console.error('❌ Database error ending session:', error);
+      return res.status(500).json({ error: 'Database update failed' });
+    }
+
+    console.log('✅ Database session ended successfully');
+    res.json({ 
+      success: true, 
+      message: 'Session ended in database',
+      meeting_id: meeting_id
+    });
+
   } catch (error) {
-    console.error('End session error:', error);
+    console.error('❌ End session error:', error);
     res.status(500).json({ error: 'Failed to end session' });
   }
 });
@@ -135,4 +153,5 @@ router.get('/debug-config', (req, res) => {
   });
 });
 
-module.exports = router;
+// FIXED: Use ES module export
+export default router;
