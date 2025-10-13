@@ -181,6 +181,66 @@ router.get('/students', async (req, res) => {
   }
 });
 
+ 
+router.post('/notify-ended', async (req, res) => {
+  try {
+    const { class_id, session_info } = req.body;
+    
+    // Get students in this class
+    const { data: students } = await supabase
+      .from('students_classes')
+      .select('student_id')
+      .eq('class_id', class_id);
+
+    // Send notifications to each student
+    if (students && students.length > 0) {
+      for (const student of students) {
+        await supabase
+          .from('notifications')
+          .insert({
+            user_id: student.student_id,
+            title: 'Class Ended',
+            message: `Class "${session_info.class_title}" has ended.`,
+            type: 'info'
+          });
+      }
+    }
+
+    res.json({ success: true, notified: students?.length || 0 });
+  } catch (error) {
+    console.error('Notify ended error:', error);
+    res.status(500).json({ error: 'Failed to notify students' });
+  }
+});
+// Delete class
+router.delete('/:classId', async (req, res) => {
+  try {
+    const { classId } = req.params;
+    
+    // Check if class exists and belongs to teacher
+    const classObj = await supabase
+      .from('classes')
+      .select('*')
+      .eq('id', classId)
+      .eq('teacher_id', req.user.id)
+      .single();
+
+    if (!classObj.data) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
+
+    // Delete class (this will cascade to related records)
+    await supabase
+      .from('classes')
+      .delete()
+      .eq('id', classId);
+
+    res.json({ success: true, message: 'Class deleted successfully' });
+  } catch (error) {
+    console.error('Delete class error:', error);
+    res.status(500).json({ error: 'Failed to delete class' });
+  }
+});
 //asignments endpoint
 router.post('/assignments', async (req, res) => {
   try {
