@@ -80,6 +80,7 @@ router.post('/generate-token', async (req, res) => {
 // ==================== VIDEO SESSION MANAGEMENT ====================
 
 // Start video session (Teacher)
+// Update the start-session route with detailed debugging
 router.post('/start-session', async (req, res) => {
   try {
     const { class_id, user_id } = req.body;
@@ -101,6 +102,8 @@ router.post('/start-session', async (req, res) => {
       .eq('id', class_id)
       .single();
 
+    console.log('🔍 Class lookup result:', { classData, classError });
+
     if (classError || !classData) {
       return res.status(404).json({ 
         success: false,
@@ -110,6 +113,10 @@ router.post('/start-session', async (req, res) => {
 
     // Check if user is the teacher of this class
     if (classData.teacher_id !== user_id) {
+      console.log('❌ Teacher authorization failed:', { 
+        classTeacher: classData.teacher_id, 
+        requestingUser: user_id 
+      });
       return res.status(403).json({ 
         success: false,
         error: 'Not authorized to start this class session' 
@@ -120,60 +127,40 @@ router.post('/start-session', async (req, res) => {
     const meetingId = `class_${class_id}_${Date.now()}`;
     const channelName = `class_${class_id}_${user_id}`;
 
-    // Check if there's already an active session for this class
-    const { data: existingSession } = await supabase
+    console.log('📝 Creating session with:', { meetingId, channelName });
+
+    // Create new video session in database
+    const { data: newSession, error: sessionError } = await supabase
       .from('video_sessions')
-      .select('id, meeting_id')
-      .eq('class_id', class_id)
-      .eq('status', 'active')
-      .single();
-
-    let sessionData;
-
-    if (existingSession) {
-      // Use existing session
-      sessionData = existingSession;
-      console.log('🔄 Using existing active session:', existingSession.meeting_id);
-    } else {
-      // Create new video session in database
-      const { data: newSession, error: sessionError } = await supabase
-        .from('video_sessions')
-        .insert([
-          {
-            class_id,
-            teacher_id: user_id,
-            meeting_id: meetingId,
-            status: 'active',
-            started_at: new Date().toISOString(),
-            channel_name: channelName,
-            agenda: `Quran Class: ${classData.title}`,
-            scheduled_date: classData.scheduled_date
-          }
-        ])
-        .select(`
-          id,
-          meeting_id,
+      .insert([
+        {
           class_id,
-          teacher_id,
-          status,
-          started_at,
-          channel_name,
-          agenda,
-          classes (
-            title
-          )
-        `)
-        .single();
+          teacher_id: user_id,
+          meeting_id: meetingId,
+          status: 'active',
+          started_at: new Date().toISOString(),
+          channel_name: channelName,
+          agenda: `Quran Class: ${classData.title}`,
+          scheduled_date: classData.scheduled_date
+        }
+      ])
+      .select()
+      .single(); // Remove the complex select for debugging
 
-      if (sessionError) {
-        console.error('❌ Error creating video session:', sessionError);
-        return res.status(500).json({ 
-          success: false,
-          error: 'Failed to create video session' 
-        });
-      }
+    console.log('🔍 Session creation result:', { newSession, sessionError });
 
-      sessionData = newSession;
+    if (sessionError) {
+      console.error('❌ Detailed session creation error:', {
+        message: sessionError.message,
+        details: sessionError.details,
+        hint: sessionError.hint,
+        code: sessionError.code
+      });
+      return res.status(500).json({ 
+        success: false,
+        error: `Failed to create video session: ${sessionError.message}`,
+        details: sessionError.details
+      });
     }
 
     // Generate Agora token for the teacher
@@ -181,6 +168,7 @@ router.post('/start-session', async (req, res) => {
     const appCertificate = process.env.AGORA_APP_CERTIFICATE;
     
     if (!appId || !appCertificate) {
+      console.log('⚠️ Agora credentials missing');
       return res.status(500).json({ 
         success: false,
         error: 'Video service not configured',
@@ -195,39 +183,39 @@ router.post('/start-session', async (req, res) => {
     const token = RtcTokenBuilder.buildTokenWithUid(
       appId,
       appCertificate,
-      sessionData.channel_name,
+      channelName,
       user_id,
       RtcRole.PUBLISHER,
       privilegeExpiredTs
     );
 
-    console.log('✅ Video session started successfully:', sessionData.meeting_id);
+    console.log('✅ Video session started successfully:', meetingId);
 
     // Clear cache for live sessions
     clearCache('liveSessions');
 
     res.json({
       success: true,
-      meeting_id: sessionData.meeting_id,
-      meetingId: sessionData.meeting_id, // Both formats for frontend compatibility
-      channel: sessionData.channel_name,
+      meeting_id: meetingId,
+      meetingId: meetingId,
+      channel: channelName,
       token,
       app_id: appId,
-      appId: appId, // Both formats for frontend compatibility
+      appId: appId,
       uid: user_id,
-      session: sessionData,
-      class_title: sessionData.classes?.title
+      session: newSession,
+      class_title: classData.title
     });
 
   } catch (error) {
-    console.error('❌ Error starting video session:', error);
+    console.error('❌ Unhandled error in start-session:', error);
     res.status(500).json({ 
       success: false,
-      error: 'Internal server error' 
+      error: 'Internal server error',
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
-
 // Join video session (Students & Teachers)
 router.post('/join-session', async (req, res) => {
   try {
