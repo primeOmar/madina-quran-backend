@@ -9,7 +9,7 @@ const router = express.Router();
 class SessionManager {
   constructor() {
     this.sessions = new Map();
-    this.cleanupInterval = setInterval(() => this.cleanup(), 300000); // Clean every 5 minutes
+    this.cleanupInterval = setInterval(() => this.cleanup(), 300000);
   }
 
   createSession(meetingId, sessionData) {
@@ -25,7 +25,7 @@ class SessionManager {
   getSession(meetingId) {
     const session = this.sessions.get(meetingId);
     if (session) {
-      session.lastActivity = Date.now(); // Update activity time
+      session.lastActivity = Date.now();
     }
     return session;
   }
@@ -38,10 +38,6 @@ class SessionManager {
       session.ended_at = new Date().toISOString();
     }
     return session;
-  }
-
-  deleteSession(meetingId) {
-    this.sessions.delete(meetingId);
   }
 
   getActiveSessions() {
@@ -62,7 +58,6 @@ class SessionManager {
     const oneHour = 60 * 60 * 1000;
     
     for (const [meetingId, session] of this.sessions.entries()) {
-      // Remove sessions older than 1 hour or ended sessions
       if (now - session.created > oneHour || session.status === 'ended') {
         console.log('🧹 Cleaning up old session:', meetingId);
         this.sessions.delete(meetingId);
@@ -72,6 +67,34 @@ class SessionManager {
 }
 
 const sessionManager = new SessionManager();
+
+// ==================== UTILITY FUNCTIONS ====================
+
+// Generate valid Agora channel name (max 64 chars, only allowed characters)
+function generateValidChannelName(classId, userId) {
+  // Extract short IDs from UUIDs (first 8 chars)
+  const shortClassId = classId.substring(0, 8);
+  const shortUserId = userId.substring(0, 8);
+  
+  // Create valid channel name: "class_XXXX_YYYY_timestamp"
+  const timestamp = Date.now().toString().substring(6); // Last few digits
+  const channelName = `class_${shortClassId}_${shortUserId}_${timestamp}`;
+  
+  // Ensure it's under 64 characters
+  if (channelName.length > 64) {
+    return channelName.substring(0, 64);
+  }
+  
+  console.log('🔧 Generated channel name:', channelName);
+  return channelName;
+}
+
+// Generate valid meeting ID
+function generateValidMeetingId(classId) {
+  const shortClassId = classId.substring(0, 8);
+  const timestamp = Date.now();
+  return `class_${shortClassId}_${timestamp}`;
+}
 
 // ==================== VIDEO SESSION MANAGEMENT ====================
 
@@ -114,11 +137,11 @@ router.post('/start-session', async (req, res) => {
       });
     }
 
-    // Generate unique meeting ID and channel name
-    const meetingId = `class_${class_id}_${Date.now()}`;
-    const channelName = `class_${class_id}_${user_id}`;
+    // Generate valid meeting ID and channel name
+    const meetingId = generateValidMeetingId(class_id);
+    const channelName = generateValidChannelName(class_id, user_id);
 
-    console.log('📝 Generated session details:', { meetingId, channelName });
+    console.log('📝 Generated valid session details:', { meetingId, channelName });
 
     // Create session in memory
     const sessionData = {
@@ -129,7 +152,7 @@ router.post('/start-session', async (req, res) => {
       started_at: new Date().toISOString(),
       channel_name: channelName,
       class_title: classData.title,
-      participants: [user_id] // Start with teacher as participant
+      participants: [user_id]
     };
 
     const session = sessionManager.createSession(meetingId, sessionData);
@@ -145,7 +168,7 @@ router.post('/start-session', async (req, res) => {
       });
     }
 
-    const expirationTime = 3600; // 1 hour
+    const expirationTime = 3600;
     const currentTime = Math.floor(Date.now() / 1000);
     const privilegeExpiredTs = currentTime + expirationTime;
 
@@ -161,8 +184,8 @@ router.post('/start-session', async (req, res) => {
     console.log('✅ SESSION STARTED SUCCESSFULLY:', { 
       meetingId, 
       channelName, 
-      teacher: user_id,
-      activeSessions: sessionManager.sessions.size 
+      channelLength: channelName.length,
+      teacher: user_id
     });
 
     res.json({
@@ -212,7 +235,6 @@ router.post('/join-session', async (req, res) => {
     });
 
     if (!session || session.status !== 'active') {
-      // Debug: List all active sessions to help troubleshoot
       const activeSessions = sessionManager.getActiveSessions();
       console.log('📊 ACTIVE SESSIONS AVAILABLE:', activeSessions.map(s => ({
         meeting_id: s.meeting_id,
@@ -250,11 +272,14 @@ router.post('/join-session', async (req, res) => {
     const currentTime = Math.floor(Date.now() / 1000);
     const privilegeExpiredTs = currentTime + expirationTime;
 
+    // Generate a valid UID (must be integer for Agora)
+    const agoraUid = parseInt(user_id.replace(/[^0-9]/g, '').substring(0, 9)) || 0;
+
     const token = RtcTokenBuilder.buildTokenWithUid(
       appId,
       appCertificate,
       session.channel_name,
-      user_id,
+      agoraUid,
       RtcRole.PUBLISHER,
       privilegeExpiredTs
     );
@@ -262,8 +287,9 @@ router.post('/join-session', async (req, res) => {
     console.log('✅ USER JOINED SESSION:', { 
       meeting_id, 
       user_id, 
-      participants: session.participants.length,
-      channel: session.channel_name 
+      agora_uid: agoraUid,
+      channel: session.channel_name,
+      channel_length: session.channel_name.length
     });
 
     res.json({
@@ -274,7 +300,7 @@ router.post('/join-session', async (req, res) => {
       token,
       app_id: appId,
       appId: appId,
-      uid: user_id,
+      uid: agoraUid, // Use the valid Agora UID
       session: session,
       class_title: session.class_title,
       is_memory_session: true
@@ -303,7 +329,6 @@ router.post('/end-session', async (req, res) => {
       });
     }
 
-    // Get session from memory
     const session = sessionManager.getSession(meeting_id);
     
     if (!session) {
@@ -313,7 +338,6 @@ router.post('/end-session', async (req, res) => {
       });
     }
 
-    // Verify teacher ownership
     if (session.teacher_id !== user_id) {
       return res.status(403).json({ 
         success: false,
@@ -321,7 +345,6 @@ router.post('/end-session', async (req, res) => {
       });
     }
 
-    // End session in memory
     sessionManager.endSession(meeting_id);
 
     console.log('✅ SESSION ENDED:', meeting_id);
@@ -372,7 +395,8 @@ router.get('/debug-sessions', (req, res) => {
   const sessions = Array.from(sessionManager.sessions.entries()).map(([id, session]) => ({
     meeting_id: id,
     ...session,
-    participants_count: session.participants?.length || 0
+    participants_count: session.participants?.length || 0,
+    channel_length: session.channel_name?.length || 0
   }));
 
   res.json({
