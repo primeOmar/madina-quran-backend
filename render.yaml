@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: madina-quran-backend
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SUPABASE_URL
+        fromDatabase:
+          name: supabase
+          property: url
+      - key: SUPABASE_SERVICE_KEY
+        fromDatabase:
+          name: supabase
+          property: service_key
