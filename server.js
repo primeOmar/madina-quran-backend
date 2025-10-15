@@ -132,6 +132,7 @@ export { clearCache, getCache, setCache };
 const allowedOrigins = [
   "https://madinaquran.vercel.app", 
   "http://localhost:3000", 
+  "http://localhost:3001",
   "https://madina-quran-backend.onrender.com", 
 ];
 
