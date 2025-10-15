@@ -130,9 +130,9 @@ export { clearCache, getCache, setCache };
 // CORS configuration to allow specific origins
 // CORRECT CORS configuration
 const allowedOrigins = [
-  "https://madinaquran.vercel.app", // Your Vercel frontend
-  "http://localhost:3000", // Local development
-  "https://madina-quran-backend.onrender.com", // Your own backend (for testing)
+  "https://madinaquran.vercel.app", 
+  "http://localhost:3000", 
+  "https://madina-quran-backend.onrender.com", 
 ];
 
 console.log("🔄 Allowed CORS origins:", allowedOrigins);
