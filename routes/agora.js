@@ -89,6 +89,40 @@ function generateValidChannelName(classId, userId) {
   return channelName;
 }
 
+
+//GENERTAE TOKEN
+router.post('/generate-token', async (req, res) => {
+  try {
+    const { channelName, uid, role = 'publisher' } = req.body;
+
+    const appId = process.env.AGORA_APP_ID;
+    const appCertificate = process.env.AGORA_APP_CERTIFICATE;
+
+    if (!appId || !appCertificate) {
+      return res.json({ token: null }); // Return null token for testing
+    }
+
+    const expirationTime = 3600; // 1 hour
+    const currentTime = Math.floor(Date.now() / 1000);
+    const privilegeExpiredTs = currentTime + expirationTime;
+
+    const token = RtcTokenBuilder.buildTokenWithUid(
+      appId,
+      appCertificate,
+      channelName,
+      uid,
+      role === 'publisher' ? RtcRole.PUBLISHER : RtcRole.SUBSCRIBER,
+      privilegeExpiredTs
+    );
+
+    res.json({ token, appId, channelName, uid });
+  } catch (error) {
+    console.error('Token generation error:', error);
+    res.json({ token: null }); // Fallback to null token
+  }
+});
+
+
 // Generate valid meeting ID
 function generateValidMeetingId(classId) {
   const shortClassId = classId.substring(0, 8);
