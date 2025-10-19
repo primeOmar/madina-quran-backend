@@ -176,7 +176,7 @@ router.post('/start-session', async (req, res) => {
 
     console.log('📝 Generated valid session details:', { meetingId, channelName });
 
-    // ✅ ADD DATABASE INSERTION HERE:
+    // ✅ FIXED DATABASE INSERTION (without participant_count):
     console.log('💾 Creating video session in database...');
     
     const { data: dbSession, error: dbError } = await supabase
@@ -189,16 +189,39 @@ router.post('/start-session', async (req, res) => {
         status: 'active',
         started_at: new Date().toISOString(),
         scheduled_date: new Date().toISOString(),
-        agenda: `Live class: ${classData.title}`,
-        participant_count: 1
+        agenda: `Live class: ${classData.title}`
+        // Removed participant_count since column doesn't exist
       }])
       .select()
       .single();
 
     if (dbError) {
       console.error('❌ Database insertion failed:', dbError);
-      // Don't fail the entire request, but log the error
-      // Continue with in-memory session as fallback
+      
+      // ✅ TRY FALLBACK INSERTION WITHOUT PROBLEMATIC COLUMNS:
+      console.log('🔄 Attempting fallback database insertion...');
+      
+      const { data: fallbackSession, error: fallbackError } = await supabase
+        .from('video_sessions')
+        .insert([{
+          meeting_id: meetingId,
+          class_id: class_id,
+          teacher_id: user_id,
+          channel_name: channelName,
+          status: 'active',
+          started_at: new Date().toISOString()
+          // Only include essential columns
+        }])
+        .select()
+        .single();
+
+      if (fallbackError) {
+        console.error('❌ Fallback insertion also failed:', fallbackError);
+      } else {
+        console.log('✅ Fallback database insertion successful');
+      }
+    } else {
+      console.log('✅ Database insertion successful');
     }
 
     // ✅ UPDATE CLASS STATUS TO ACTIVE:
@@ -210,22 +233,23 @@ router.post('/start-session', async (req, res) => {
 
     if (classUpdateError) {
       console.error('❌ Class status update failed:', classUpdateError);
+    } else {
+      console.log('✅ Class status updated to active');
     }
 
     // ✅ SEND NOTIFICATIONS TO ENROLLED STUDENTS:
     console.log('🔔 Notifying enrolled students...');
+    let notifiedStudents = 0;
+    
     try {
       const { data: enrollments, error: enrollmentError } = await supabase
         .from('students_classes')
-        .select(`
-          student_id,
-          profiles:student_id (name, email)
-        `)
+        .select('student_id')
         .eq('class_id', class_id);
 
       if (!enrollmentError && enrollments && enrollments.length > 0) {
         const notificationPromises = enrollments.map(async (enrollment) => {
-          const { data: notification, error: notifError } = await supabase
+          const { error: notifError } = await supabase
             .from('notifications')
             .insert([{
               user_id: enrollment.student_id,
@@ -236,7 +260,7 @@ router.post('/start-session', async (req, res) => {
                 class_id: class_id,
                 meeting_id: meetingId,
                 class_title: classData.title,
-                teacher_name: classData.teacher?.name || 'Teacher',
+                teacher_id: user_id,
                 action_url: `/join-class/${meetingId}`,
                 started_at: new Date().toISOString()
               },
@@ -244,13 +268,16 @@ router.post('/start-session', async (req, res) => {
               updated_at: new Date().toISOString()
             }]);
 
-          if (notifError) {
-            console.error(`❌ Failed to notify student ${enrollment.student_id}:`, notifError);
+          if (!notifError) {
+            notifiedStudents++;
           }
+          return notifError;
         });
 
         await Promise.allSettled(notificationPromises);
-        console.log(`✅ Sent notifications to ${enrollments.length} students`);
+        console.log(`✅ Sent notifications to ${notifiedStudents} students`);
+      } else {
+        console.log('ℹ️ No students enrolled in this class to notify');
       }
     } catch (notifError) {
       console.error('❌ Notification sending failed:', notifError);
@@ -266,7 +293,8 @@ router.post('/start-session', async (req, res) => {
       channel_name: channelName,
       class_title: classData.title,
       participants: [user_id],
-      db_session_id: dbSession?.id // Store DB ID if available
+      db_session_id: dbSession?.id,
+      participant_count: 1 // Track in memory even if not in DB
     };
 
     const session = sessionManager.createSession(meetingId, sessionData);
@@ -301,7 +329,7 @@ router.post('/start-session', async (req, res) => {
       channelLength: channelName.length,
       teacher: user_id,
       db_session_created: !!dbSession,
-      students_notified: true
+      students_notified: notifiedStudents
     });
 
     res.json({
@@ -316,7 +344,7 @@ router.post('/start-session', async (req, res) => {
       session: session,
       class_title: classData.title,
       db_session_created: !!dbSession,
-      students_notified: true,
+      students_notified: notifiedStudents,
       is_memory_session: true
     });
 
