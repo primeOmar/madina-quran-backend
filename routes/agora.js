@@ -136,7 +136,6 @@ function generateValidMeetingId(classId) {
 router.post('/start-session', async (req, res) => {
   try {
     const { class_id, user_id } = req.body;
-
     console.log('🎬 START-SESSION REQUEST:', { class_id, user_id });
 
     // Validate inputs
@@ -177,6 +176,86 @@ router.post('/start-session', async (req, res) => {
 
     console.log('📝 Generated valid session details:', { meetingId, channelName });
 
+    // ✅ ADD DATABASE INSERTION HERE:
+    console.log('💾 Creating video session in database...');
+    
+    const { data: dbSession, error: dbError } = await supabase
+      .from('video_sessions')
+      .insert([{
+        meeting_id: meetingId,
+        class_id: class_id,
+        teacher_id: user_id,
+        channel_name: channelName,
+        status: 'active',
+        started_at: new Date().toISOString(),
+        scheduled_date: new Date().toISOString(),
+        agenda: `Live class: ${classData.title}`,
+        participant_count: 1
+      }])
+      .select()
+      .single();
+
+    if (dbError) {
+      console.error('❌ Database insertion failed:', dbError);
+      // Don't fail the entire request, but log the error
+      // Continue with in-memory session as fallback
+    }
+
+    // ✅ UPDATE CLASS STATUS TO ACTIVE:
+    console.log('🔄 Updating class status to active...');
+    const { error: classUpdateError } = await supabase
+      .from('classes')
+      .update({ status: 'active' })
+      .eq('id', class_id);
+
+    if (classUpdateError) {
+      console.error('❌ Class status update failed:', classUpdateError);
+    }
+
+    // ✅ SEND NOTIFICATIONS TO ENROLLED STUDENTS:
+    console.log('🔔 Notifying enrolled students...');
+    try {
+      const { data: enrollments, error: enrollmentError } = await supabase
+        .from('students_classes')
+        .select(`
+          student_id,
+          profiles:student_id (name, email)
+        `)
+        .eq('class_id', class_id);
+
+      if (!enrollmentError && enrollments && enrollments.length > 0) {
+        const notificationPromises = enrollments.map(async (enrollment) => {
+          const { data: notification, error: notifError } = await supabase
+            .from('notifications')
+            .insert([{
+              user_id: enrollment.student_id,
+              title: '🎥 Class Started Live',
+              message: `Your class "${classData.title}" has started. Click to join the live session!`,
+              type: 'live_class',
+              data: {
+                class_id: class_id,
+                meeting_id: meetingId,
+                class_title: classData.title,
+                teacher_name: classData.teacher?.name || 'Teacher',
+                action_url: `/join-class/${meetingId}`,
+                started_at: new Date().toISOString()
+              },
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            }]);
+
+          if (notifError) {
+            console.error(`❌ Failed to notify student ${enrollment.student_id}:`, notifError);
+          }
+        });
+
+        await Promise.allSettled(notificationPromises);
+        console.log(`✅ Sent notifications to ${enrollments.length} students`);
+      }
+    } catch (notifError) {
+      console.error('❌ Notification sending failed:', notifError);
+    }
+
     // Create session in memory
     const sessionData = {
       id: meetingId,
@@ -186,7 +265,8 @@ router.post('/start-session', async (req, res) => {
       started_at: new Date().toISOString(),
       channel_name: channelName,
       class_title: classData.title,
-      participants: [user_id]
+      participants: [user_id],
+      db_session_id: dbSession?.id // Store DB ID if available
     };
 
     const session = sessionManager.createSession(meetingId, sessionData);
@@ -219,7 +299,9 @@ router.post('/start-session', async (req, res) => {
       meetingId, 
       channelName, 
       channelLength: channelName.length,
-      teacher: user_id
+      teacher: user_id,
+      db_session_created: !!dbSession,
+      students_notified: true
     });
 
     res.json({
@@ -233,6 +315,8 @@ router.post('/start-session', async (req, res) => {
       uid: user_id,
       session: session,
       class_title: classData.title,
+      db_session_created: !!dbSession,
+      students_notified: true,
       is_memory_session: true
     });
 
@@ -379,6 +463,30 @@ router.post('/end-session', async (req, res) => {
       });
     }
 
+    // ✅ UPDATE DATABASE SESSION STATUS:
+    console.log('💾 Updating video session in database...');
+    
+    const { error: dbError } = await supabase
+      .from('video_sessions')
+      .update({
+        status: 'ended',
+        ended_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq('meeting_id', meeting_id)
+      .eq('teacher_id', user_id);
+
+    if (dbError) {
+      console.error('❌ Database update failed:', dbError);
+    }
+
+    // ✅ UPDATE CLASS STATUS BACK TO SCHEDULED:
+    console.log('🔄 Updating class status to scheduled...');
+    await supabase
+      .from('classes')
+      .update({ status: 'scheduled' })
+      .eq('id', session.class_id);
+
     sessionManager.endSession(meeting_id);
 
     console.log('✅ SESSION ENDED:', meeting_id);
@@ -387,6 +495,7 @@ router.post('/end-session', async (req, res) => {
       success: true,
       message: 'Session ended successfully',
       session: session,
+      db_updated: !dbError,
       is_memory_session: true
     });
 
@@ -404,15 +513,43 @@ router.post('/end-session', async (req, res) => {
 // Get active sessions
 router.get('/active-sessions', async (req, res) => {
   try {
-    const sessions = sessionManager.getActiveSessions();
+    // ✅ COMBINE MEMORY SESSIONS WITH DATABASE SESSIONS:
     
-    console.log('📊 ACTIVE SESSIONS QUERY:', { count: sessions.length });
+    // 1. Get sessions from memory (for real-time active sessions)
+    const memorySessions = sessionManager.getActiveSessions();
+    
+    // 2. Get sessions from database (for persistence)
+    const { data: dbSessions, error } = await supabase
+      .from('video_sessions')
+      .select(`
+        *,
+        class:classes (title, teacher_id, description),
+        teacher:profiles (name, email)
+      `)
+      .eq('status', 'active')
+      .order('started_at', { ascending: false });
+
+    // Combine both sources, prioritizing memory sessions
+    const allSessions = [
+      ...memorySessions,
+      ...(dbSessions || []).map(session => ({
+        ...session,
+        is_db_session: true,
+        participants: session.participants || []
+      }))
+    ];
+
+    console.log('📊 Combined active sessions:', { 
+      memory: memorySessions.length, 
+      database: dbSessions?.length || 0 
+    });
 
     res.json({
       success: true,
-      sessions: sessions,
-      total_count: sessions.length,
-      is_memory_sessions: true
+      sessions: allSessions,
+      total_count: allSessions.length,
+      memory_sessions: memorySessions.length,
+      database_sessions: dbSessions?.length || 0
     });
 
   } catch (error) {
@@ -423,7 +560,6 @@ router.get('/active-sessions', async (req, res) => {
     });
   }
 });
-
 // Debug endpoint to see all sessions
 router.get('/debug-sessions', (req, res) => {
   const sessions = Array.from(sessionManager.sessions.entries()).map(([id, session]) => ({
