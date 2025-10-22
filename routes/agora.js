@@ -405,7 +405,7 @@ router.post('/join-session', async (req, res) => {
             console.log('🎓 Verifying student enrollment...');
 
             const { data: enrollment, error: enrollmentError } = await supabase
-            .from('student_classes')
+            .from('classes')
             .select('id')
             .eq('class_id', session.class_id)
             .eq('student_id', user_id)
