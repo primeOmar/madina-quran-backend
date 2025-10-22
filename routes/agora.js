@@ -604,7 +604,354 @@ router.get('/debug-sessions', (req, res) => {
     timestamp: new Date().toISOString()
   });
 });
+// ==================== video student ENDPOINTS ====================
 
+// Get session status 
+router.get('/session-status/:meetingId', async (req, res) => {
+  try {
+    const { meetingId } = req.params;
+    
+    console.log('🔍 Checking session status:', meetingId);
+
+    // Get session from memory
+    const session = sessionManager.getSession(meetingId);
+    
+    if (!session) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Session not found',
+        is_active: false,
+        is_teacher_joined: false,
+        student_count: 0
+      });
+    }
+
+    // Check if teacher has joined (teacher is always first participant)
+    const isTeacherJoined = session.participants && 
+                           session.participants.includes(session.teacher_id);
+    
+    // Count students (excluding teacher)
+    const studentCount = session.participants ? 
+                        session.participants.filter(id => id !== session.teacher_id).length : 0;
+
+    console.log('✅ Session status:', {
+      meetingId,
+      is_active: session.status === 'active',
+      is_teacher_joined: isTeacherJoined,
+      student_count: studentCount,
+      total_participants: session.participants?.length || 0
+    });
+
+    res.json({
+      success: true,
+      is_active: session.status === 'active',
+      is_teacher_joined: isTeacherJoined,
+      student_count: studentCount,
+      total_participants: session.participants?.length || 0,
+      started_at: session.started_at,
+      teacher_id: session.teacher_id,
+      class_title: session.class_title
+    });
+
+  } catch (error) {
+    console.error('❌ Error checking session status:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Internal server error',
+      is_active: false,
+      is_teacher_joined: false,
+      student_count: 0
+    });
+  }
+});
+
+// Leave video session (CRITICAL - frontend depends on this)
+router.post('/leave-session', async (req, res) => {
+  try {
+    const { meeting_id, user_id, duration = 0, user_type = 'student' } = req.body;
+
+    console.log('🚪 LEAVE-SESSION REQUEST:', { meeting_id, user_id, duration, user_type });
+
+    if (!meeting_id || !user_id) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Meeting ID and User ID are required' 
+      });
+    }
+
+    const session = sessionManager.getSession(meeting_id);
+    
+    if (!session) {
+      console.log('⚠️ Session not found in memory, but allowing leave anyway');
+      return res.json({
+        success: true,
+        message: 'Session left (session not found)'
+      });
+    }
+
+    // Remove user from participants
+    if (session.participants && session.participants.includes(user_id)) {
+      session.participants = session.participants.filter(id => id !== user_id);
+      console.log('✅ Removed user from participants:', user_id);
+    }
+
+    // Record leave in database if possible
+    try {
+      const { data: dbSession } = await supabase
+        .from('video_sessions')
+        .select('id')
+        .eq('meeting_id', meeting_id)
+        .single();
+
+      if (dbSession) {
+        await supabase
+          .from('video_session_participants')
+          .update({
+            status: 'left',
+            left_at: new Date().toISOString(),
+            duration_minutes: Math.round(duration / 60)
+          })
+          .eq('session_id', dbSession.id)
+          .eq('student_id', user_id)
+          .is('left_at', null);
+        
+        console.log('✅ Recorded leave in database');
+      }
+    } catch (dbError) {
+      console.warn('⚠️ Could not record leave in database:', dbError.message);
+    }
+
+    console.log('✅ USER LEFT SESSION:', { 
+      meeting_id, 
+      user_id, 
+      remaining_participants: session.participants?.length || 0 
+    });
+
+    res.json({
+      success: true,
+      message: 'Successfully left video session',
+      remaining_participants: session.participants?.length || 0
+    });
+
+  } catch (error) {
+    console.error('❌ Error leaving video session:', error);
+    // Always return success for leave operations
+    res.json({
+      success: true,
+      message: 'Left session (with errors)'
+    });
+  }
+});
+
+// Enhanced join session with student verification
+router.post('/join-session', async (req, res) => {
+  try {
+    const { meeting_id, user_id, user_type = 'student' } = req.body;
+
+    console.log('🔗 JOIN-SESSION REQUEST:', { meeting_id, user_id, user_type });
+
+    if (!meeting_id || !user_id) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Meeting ID and User ID are required' 
+      });
+    }
+
+    // Get session from memory
+    const session = sessionManager.getSession(meeting_id);
+    
+    console.log('🔍 Session lookup result:', { 
+      meeting_id, 
+      sessionFound: !!session,
+      sessionStatus: session?.status 
+    });
+
+    if (!session || session.status !== 'active') {
+      const activeSessions = sessionManager.getActiveSessions();
+      console.log('📊 ACTIVE SESSIONS AVAILABLE:', activeSessions.map(s => ({
+        meeting_id: s.meeting_id,
+        class_id: s.class_id,
+        teacher_id: s.teacher_id
+      })));
+
+      return res.status(404).json({ 
+        success: false,
+        error: 'Active session not found',
+        debug: {
+          requested_meeting_id: meeting_id,
+          active_sessions: activeSessions.map(s => s.meeting_id)
+        }
+      });
+    }
+
+    // ✅ VERIFY STUDENT ENROLLMENT (for students only)
+    if (user_type === 'student') {
+      console.log('🎓 Verifying student enrollment...');
+      
+      const { data: enrollment, error: enrollmentError } = await supabase
+        .from('student_classes')
+        .select('id')
+        .eq('class_id', session.class_id)
+        .eq('student_id', user_id)
+        .single();
+
+      if (enrollmentError || !enrollment) {
+        console.log('❌ Student not enrolled in class:', {
+          class_id: session.class_id,
+          student_id: user_id,
+          error: enrollmentError?.message
+        });
+        
+        return res.status(403).json({ 
+          success: false,
+          error: 'Not enrolled in this class'
+        });
+      }
+      console.log('✅ Student enrollment verified');
+    }
+
+    // ✅ VERIFY TEACHER AUTHORIZATION (for teachers)
+    if (user_type === 'teacher' && session.teacher_id !== user_id) {
+      return res.status(403).json({ 
+        success: false,
+        error: 'Not authorized to join this session as teacher'
+      });
+    }
+
+    // Add user to participants if not already there
+    if (!session.participants.includes(user_id)) {
+      session.participants.push(user_id);
+      console.log('✅ Added user to participants:', user_id);
+    }
+
+    // Record join in database
+    try {
+      const { data: dbSession } = await supabase
+        .from('video_sessions')
+        .select('id')
+        .eq('meeting_id', meeting_id)
+        .single();
+
+      if (dbSession) {
+        await supabase
+          .from('video_session_participants')
+          .upsert({
+            session_id: dbSession.id,
+            student_id: user_id,
+            joined_at: new Date().toISOString(),
+            status: 'joined',
+            is_teacher: user_type === 'teacher',
+            updated_at: new Date().toISOString()
+          }, {
+            onConflict: 'session_id,student_id'
+          });
+        
+        console.log('✅ Recorded join in database');
+      }
+    } catch (dbError) {
+      console.warn('⚠️ Could not record join in database:', dbError.message);
+    }
+
+    // Generate Agora token with better UID handling
+    const appId = process.env.AGORA_APP_ID;
+    const appCertificate = process.env.AGORA_APP_CERTIFICATE;
+    
+    if (!appId || !appCertificate) {
+      return res.status(500).json({ 
+        success: false,
+        error: 'Video service not configured'
+      });
+    }
+
+    const expirationTime = 3600;
+    const currentTime = Math.floor(Date.now() / 1000);
+    const privilegeExpiredTs = currentTime + expirationTime;
+
+    // ✅ IMPROVED UID GENERATION (must be integer 1-4294967295)
+    let agoraUid;
+    if (user_type === 'teacher') {
+      // Teacher gets a consistent UID
+      agoraUid = 1;
+    } else {
+      // Students get unique UIDs based on their ID
+      const numericId = parseInt(user_id.replace(/[^0-9]/g, '').substring(0, 6)) || 0;
+      agoraUid = Math.max(2, Math.min(1000000, 1000 + numericId)); // Range: 1000-1000000
+    }
+
+    const token = RtcTokenBuilder.buildTokenWithUid(
+      appId,
+      appCertificate,
+      session.channel_name,
+      agoraUid,
+      RtcRole.PUBLISHER,
+      privilegeExpiredTs
+    );
+
+    console.log('✅ USER JOINED SESSION SUCCESSFULLY:', { 
+      meeting_id, 
+      user_id, 
+      user_type,
+      agora_uid: agoraUid,
+      channel: session.channel_name,
+      participants_count: session.participants.length
+    });
+
+    res.json({
+      success: true,
+      meeting_id: meeting_id,
+      meetingId: meeting_id,
+      channel: session.channel_name,
+      token,
+      app_id: appId,
+      appId: appId,
+      uid: agoraUid,
+      session: session,
+      class_title: session.class_title,
+      user_type: user_type,
+      participants_count: session.participants.length,
+      is_memory_session: true
+    });
+
+  } catch (error) {
+    console.error('❌ Error joining video session:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Internal server error' 
+    });
+  }
+});
+
+// Get session info (useful for debugging)
+router.get('/session-info/:meetingId', async (req, res) => {
+  try {
+    const { meetingId } = req.params;
+    
+    const session = sessionManager.getSession(meetingId);
+    
+    if (!session) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Session not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      session: {
+        ...session,
+        participants_count: session.participants?.length || 0,
+        channel_valid: session.channel_name && session.channel_name.length <= 64
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error getting session info:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Internal server error' 
+    });
+  }
+});
 // Health check
 router.get('/health', (req, res) => {
   const appId = process.env.AGORA_APP_ID;
