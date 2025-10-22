@@ -361,7 +361,7 @@ router.post('/start-session', async (req, res) => {
 
 // ==================== UNIFIED JOIN SESSION (Teachers & Students) ====================
 
-// Join video session (Works for both Teachers & Students)
+
 router.post('/join-session', async (req, res) => {
     try {
         const { meeting_id, user_id, user_type = 'student', user_name = 'User' } = req.body;
@@ -405,9 +405,11 @@ router.post('/join-session', async (req, res) => {
             });
         }
         
-        // ✅ VERIFY TEACHER AUTHORIZATION (for teachers)
+        // ✅ TEACHER JOINING LOGIC
         if (user_type === 'teacher') {
-            console.log('👨‍🏫 Verifying teacher authorization...');
+            console.log('👨‍🏫 Teacher joining session...');
+            
+            // Verify teacher owns this session
             if (session.teacher_id !== user_id) {
                 console.log('❌ Teacher not authorized for this session:', {
                     session_teacher: session.teacher_id,
@@ -418,39 +420,38 @@ router.post('/join-session', async (req, res) => {
                     error: 'Not authorized to join this session as teacher'
                 });
             }
-            console.log('✅ Teacher authorization verified');
-        }
-        
-        // ✅ VERIFY STUDENT ENROLLMENT (for students only)
-        if (user_type === 'student') {
-            console.log('🎓 Verifying student enrollment...');
             
-            const { data: enrollment, error: enrollmentError } = await supabase
-            .from('student_classes')
-            .select('id')
-            .eq('class_id', session.class_id)
-            .eq('student_id', user_id)
-            .single();
+            console.log('✅ Teacher authorization verified - session owner');
             
-            if (enrollmentError || !enrollment) {
-                console.log('❌ Student not enrolled in class:', {
-                    class_id: session.class_id,
-                    student_id: user_id,
-                    error: enrollmentError?.message
-                });
-                
-                return res.status(403).json({ 
-                    success: false,
-                    error: 'Not enrolled in this class'
-                });
+            // Add teacher to participants if not already there
+            if (!session.participants.includes(user_id)) {
+                session.participants.push(user_id);
+                console.log('✅ Added teacher to participants:', user_id);
             }
-            console.log('✅ Student enrollment verified');
-        }
-        
-        // Add user to participants if not already there
-        if (!session.participants.includes(user_id)) {
-            session.participants.push(user_id);
-            console.log('✅ Added user to participants:', { user_id, user_type });
+            
+        } 
+        // ✅ STUDENT JOINING LOGIC  
+        else if (user_type === 'student') {
+            console.log('🎓 Student joining session...');
+            
+            // ⚠️ REMOVED ENROLLMENT CHECK - Students can join without enrollment constraints
+            console.log('✅ Student joining without enrollment check');
+            
+            // Add student to participants if not already there
+            if (!session.participants.includes(user_id)) {
+                session.participants.push(user_id);
+                console.log('✅ Added student to participants:', user_id);
+            }
+        } 
+        // ✅ UNKNOWN USER TYPE
+        else {
+            console.log('❓ Unknown user type, defaulting to student:', user_type);
+            
+            // Add user to participants if not already there
+            if (!session.participants.includes(user_id)) {
+                session.participants.push(user_id);
+                console.log('✅ Added user to participants with default student role:', user_id);
+            }
         }
         
         // Record join in database
@@ -499,7 +500,7 @@ router.post('/join-session', async (req, res) => {
         const currentTime = Math.floor(Date.now() / 1000);
         const privilegeExpiredTs = currentTime + expirationTime;
         
-        // ✅ IMPROVED UID GENERATION (must be integer 1-4294967295)
+        // ✅ IMPROVED UID GENERATION
         let agoraUid;
         if (user_type === 'teacher') {
             // Teacher always gets UID 1 for consistency
