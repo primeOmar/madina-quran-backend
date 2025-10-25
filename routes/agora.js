@@ -371,20 +371,19 @@ router.post('/start-session', async (req, res) => {
 
 // ==================== JOIN SESSION (ENHANCED) ====================
 
-// Join video session (Students & Teachers)
 router.post('/join-session', async (req, res) => {
   try {
     const { meeting_id, user_id, user_type = 'teacher', user_name = 'Teacher' } = req.body;
-    
+
     console.log('🔗 TEACHER JOIN-SESSION REQUEST:', { meeting_id, user_id, user_type, user_name });
-    
+
     if (!meeting_id || !user_id) {
       return res.status(400).json({
         success: false,
         error: 'Meeting ID and User ID are required'
       });
     }
-    
+
     // Get session from memory FIRST
     let session = sessionManager.getSession(meeting_id);
     
@@ -394,25 +393,25 @@ router.post('/join-session', async (req, res) => {
       sessionStatus: session?.status,
       sessionTeacher: session?.teacher_id
     });
-    
+
     // ✅ CRITICAL FIX: If session not in memory, try to restore from database
     if (!session) {
       console.log('🔄 Session not in memory, checking database...');
       
       const { data: dbSession, error: dbError } = await supabase
-      .from('video_sessions')
-      .select(`
-      *,
-      classes (
-        title,
-        teacher_id
-      )
-      `)
-      .eq('meeting_id', meeting_id)
-      .eq('status', 'active')
-      .is('ended_at', null)
-      .single();
-      
+        .from('video_sessions')
+        .select(`
+          *,
+          classes (
+            title,
+            teacher_id
+          )
+        `)
+        .eq('meeting_id', meeting_id)
+        .eq('status', 'active')
+        .is('ended_at', null)
+        .single();
+
       if (dbError || !dbSession) {
         console.log('❌ No active session found in database either');
         const activeSessions = sessionManager.getActiveSessions();
@@ -423,11 +422,11 @@ router.post('/join-session', async (req, res) => {
           debug: {
             requested_meeting_id: meeting_id,
             memory_sessions: activeSessions.map(s => s.meeting_id),
-                                    suggestion: 'Teacher needs to start the session first'
+            suggestion: 'Teacher needs to start the session first'
           }
         });
       }
-      
+
       // ✅ RESTORE SESSION FROM DATABASE
       console.log('✅ Found session in database, restoring to memory...');
       session = sessionManager.createSession(meeting_id, {
@@ -441,10 +440,10 @@ router.post('/join-session', async (req, res) => {
         participants: [dbSession.teacher_id], // Start with teacher
         db_session_id: dbSession.id
       });
-      
+
       console.log('🔄 Session restored from database:', session);
     }
-    
+
     // ✅ TEACHER-ONLY: Verify this is the session owner
     if (session.teacher_id !== user_id) {
       console.log('❌ Teacher authorization failed:', {
@@ -457,19 +456,19 @@ router.post('/join-session', async (req, res) => {
         error: 'Not authorized to join this session. Only the session owner can join.'
       });
     }
-    
+
     console.log('✅ Teacher authorization verified');
-    
+
     // Add teacher to participants if not already there
     if (!session.participants.includes(user_id)) {
       session.participants.push(user_id);
       console.log('✅ Added teacher to participants:', user_id);
     }
-    
+
     // Generate Agora credentials
     const appId = process.env.AGORA_APP_ID;
     const appCertificate = process.env.AGORA_APP_CERTIFICATE;
-    
+
     if (!appId || !appCertificate) {
       console.error('❌ Agora credentials not configured');
       return res.status(500).json({
@@ -477,14 +476,14 @@ router.post('/join-session', async (req, res) => {
         error: 'Video service not configured'
       });
     }
-    
+
     const expirationTime = 3600;
     const currentTime = Math.floor(Date.now() / 1000);
     const privilegeExpiredTs = currentTime + expirationTime;
-    
+
     // Teacher always gets UID 1
     const agoraUid = 1;
-    
+
     const token = RtcTokenBuilder.buildTokenWithUid(
       appId,
       appCertificate,
@@ -493,7 +492,7 @@ router.post('/join-session', async (req, res) => {
       RtcRole.PUBLISHER,
       privilegeExpiredTs
     );
-    
+
     console.log('✅ TEACHER JOINED SESSION SUCCESSFULLY:', {
       meeting_id,
       teacher_id: user_id,
@@ -503,7 +502,7 @@ router.post('/join-session', async (req, res) => {
       participants_count: session.participants.length,
       session_source: session.db_session_id ? 'database_restored' : 'memory'
     });
-    
+
     res.json({
       success: true,
       meeting_id: meeting_id,
@@ -522,7 +521,7 @@ router.post('/join-session', async (req, res) => {
       user_type: 'teacher',
       is_restored: !!session.db_session_id
     });
-    
+
   } catch (error) {
     console.error('❌ Error in teacher join-session:', error);
     res.status(500).json({
@@ -530,7 +529,7 @@ router.post('/join-session', async (req, res) => {
       error: 'Internal server error: ' + error.message
     });
   }
-}),
+});
 
 // help debug session issues
 router.get('/session-recovery/:meetingId', async (req, res) => {
@@ -544,17 +543,17 @@ router.get('/session-recovery/:meetingId', async (req, res) => {
     
     // Check database
     const { data: dbSession, error } = await supabase
-    .from('video_sessions')
-    .select(`
-    *,
-    classes (
-      title,
-      teacher_id
-    )
-    `)
-    .eq('meeting_id', meetingId)
-    .single();
-    
+      .from('video_sessions')
+      .select(`
+        *,
+        classes (
+          title,
+          teacher_id
+        )
+      `)
+      .eq('meeting_id', meetingId)
+      .single();
+
     const recoveryData = {
       meeting_id: meetingId,
       in_memory: !!memorySession,
@@ -567,9 +566,9 @@ router.get('/session-recovery/:meetingId', async (req, res) => {
       db_started: dbSession?.started_at,
       class_title: dbSession?.classes?.title
     };
-    
+
     console.log('📊 Session recovery data:', recoveryData);
-    
+
     // If found in database but not memory, restore it
     if (dbSession && !memorySession && dbSession.status === 'active') {
       console.log('🔄 Restoring session from database to memory...');
@@ -580,7 +579,9 @@ router.get('/session-recovery/:meetingId', async (req, res) => {
         status: 'active',
         started_at: dbSession.started_at,
         channel_name: dbSession.channel_name,
-        class_title: dbSession.classes?.title,
+        
+
+class_title: dbSession.classes?.title,
         participants: [dbSession.teacher_id],
         db_session_id: dbSession.id
       });
@@ -588,12 +589,12 @@ router.get('/session-recovery/:meetingId', async (req, res) => {
       recoveryData.restored_session = restoredSession;
       recoveryData.restored = true;
     }
-    
+
     res.json({
       success: true,
       ...recoveryData
     });
-    
+
   } catch (error) {
     console.error('❌ Session recovery error:', error);
     res.status(500).json({
@@ -602,6 +603,7 @@ router.get('/session-recovery/:meetingId', async (req, res) => {
     });
   }
 });
+
 
 // End video session (Teacher only)
 router.post('/end-session', async (req, res) => {
