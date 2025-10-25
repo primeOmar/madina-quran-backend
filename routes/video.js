@@ -184,8 +184,6 @@ async function getSessionParticipants(meetingId) {
   }
 }
 
-// Enhanced validation
-
 // ==================== PRODUCTION ROUTES ====================
 
 // Session Status - PRODUCTION READY
@@ -373,7 +371,7 @@ router.post('/start-session', async (req, res) => {
   }
 });
 
-// verify student
+// Verify student access
 const validateStudentAccess = async (classId, studentId) => {
   try {
     console.log('🔍 Validating student access:', { classId, studentId });
@@ -421,6 +419,7 @@ const validateStudentAccess = async (classId, studentId) => {
     return true;
   }
 };
+
 // Join Session - PRODUCTION READY (FIXED FOR STUDENT)
 router.post('/join-session', async (req, res) => {
   try {
@@ -488,8 +487,6 @@ router.post('/join-session', async (req, res) => {
         error: 'Active session not found or ended'
       });
     }
-
-    // ✅ REMOVED ENROLLMENT CHECK - Students can join any class by their teacher
 
     // For students, validate they have the same teacher as the class
     if (user_type === 'student') {
@@ -601,7 +598,6 @@ router.post('/join-session', async (req, res) => {
       error: 'Internal server error: ' + error.message
     });
   }
-});
 });
 
 // Leave Session - PRODUCTION READY
