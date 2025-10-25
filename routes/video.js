@@ -393,21 +393,21 @@ router.post('/start-session', async (req, res) => {
 router.post('/join-session', async (req, res) => {
   try {
     const { meeting_id, user_id, user_type = 'student', user_name = 'Student' } = req.body;
-    
+
     console.log('🔗 PRODUCTION JOIN-SESSION REQUEST:', { meeting_id, user_id, user_type, user_name });
-    
+
     // Validate inputs
     if (!meeting_id || !user_id) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        error: 'Meeting ID and User ID are required' 
+        error: 'Meeting ID and User ID are required'
       });
     }
-    
+
     // Get session from memory or database
     let session = sessionManager.getSession(meeting_id);
     let classData = null;
-    
+
     if (!session) {
       // Try to get session from database with class info
       const { data: dbSession, error: dbError } = await supabase
@@ -424,14 +424,14 @@ router.post('/join-session', async (req, res) => {
         `)
         .eq('meeting_id', meeting_id)
         .single();
-        
+
       if (dbError || !dbSession) {
-        return res.status(404).json({ 
+        return res.status(404).json({
           success: false,
           error: 'Active session not found'
         });
       }
-      
+
       // Create memory session from database
       session = sessionManager.createSession(meeting_id, {
         ...dbSession,
@@ -439,53 +439,58 @@ router.post('/join-session', async (req, res) => {
         teacher_name: dbSession.classes?.teacher?.name,
         participants: []
       });
-      
+
       classData = dbSession.classes;
     }
-    
-    console.log('🔍 Session lookup result:', { 
-      meeting_id, 
+
+    console.log('🔍 Session lookup result:', {
+      meeting_id,
       sessionFound: !!session,
       sessionStatus: session?.status,
       sessionTeacher: session?.teacher_id
     });
-    
+
     if (!session || session.status !== 'active') {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
         error: 'Active session not found or ended'
       });
     }
-    
-    // For students, validate enrollment
+
+    // ✅ REMOVED ENROLLMENT CHECK - Students can join any class by their teacher
+
+    // For students, validate they have the same teacher as the class
     if (user_type === 'student') {
-      const isEnrolled = await validateStudentEnrollment(session.class_id, user_id);
-      if (!isEnrolled) {
-        console.log('❌ Student not enrolled:', { class_id: session.class_id, user_id });
-        return res.status(403).json({ 
+      const hasAccess = await validateStudentAccess(session.class_id, user_id);
+      if (!hasAccess) {
+        console.log('❌ Student not authorized for this class:', { 
+          class_id: session.class_id, 
+          user_id 
+        });
+        return res.status(403).json({
           success: false,
-          error: 'Student not enrolled in this class' 
+          error: 'Student not authorized to join this class'
         });
       }
     }
-    
+
     // Generate Agora credentials
     const appId = process.env.AGORA_APP_ID;
     const appCertificate = process.env.AGORA_APP_CERTIFICATE;
-    
+
     if (!appId || !appCertificate) {
       console.error('❌ Agora credentials not configured');
-      return res.status(500).json({ 
+      return res.status(500).json({
         success: false,
         error: 'Video service not configured'
       });
     }
-    
+
     const expirationTime = 3600; // 1 hour
     const currentTime = Math.floor(Date.now() / 1000);
     const privilegeExpiredTs = currentTime + expirationTime;
-    
-    // UID generation - FIXED for production
+
+    // UID generation
     let agoraUid;
     if (user_type === 'teacher') {
       agoraUid = 1; // Teacher always gets UID 1
@@ -497,10 +502,10 @@ router.post('/join-session', async (req, res) => {
       }, 0);
       agoraUid = Math.abs(hash % 100000) + 1000; // Students get 1000+
     }
-    
+
     // Ensure UID is valid integer
     agoraUid = Math.max(1, Math.min(4294967295, agoraUid));
-    
+
     // Generate token
     const token = RtcTokenBuilder.buildTokenWithUid(
       appId,
@@ -510,7 +515,7 @@ router.post('/join-session', async (req, res) => {
       RtcRole.PUBLISHER,
       privilegeExpiredTs
     );
-    
+
     // Record participation (non-blocking)
     recordParticipantJoin(meeting_id, user_id, user_type)
       .then(success => {
@@ -523,29 +528,29 @@ router.post('/join-session', async (req, res) => {
       .catch(err => {
         console.error('❌ Error recording participation:', err);
       });
-    
+
     // Update memory session participants
     if (session.participants && !session.participants.includes(user_id)) {
       session.participants.push(user_id);
     }
-    
-    console.log('✅ PRODUCTION USER JOIN SESSION SUCCESS:', { 
-      meeting_id, 
-      user_id, 
+
+    console.log('✅ PRODUCTION USER JOIN SESSION SUCCESS:', {
+      meeting_id,
+      user_id,
       user_type,
       agora_uid: agoraUid,
       channel: session.channel_name
     });
-    
+
     // Return success response with all required data
     const response = {
       success: true,
-      meeting_id: meeting_id,
+      meetingId: meeting_id, 
       channel: session.channel_name,
       token,
-      app_id: appId,
+      appId: appId,
       uid: agoraUid,
-      session: {
+      sessionInfo: { 
         id: session.id,
         class_id: session.class_id,
         teacher_id: session.teacher_id,
@@ -554,24 +559,17 @@ router.post('/join-session', async (req, res) => {
         teacher_name: session.teacher_name || classData?.teacher?.name
       }
     };
-    
-    // Add class info if available
-    if (session.class_title) {
-      response.class_title = session.class_title;
-    }
-    if (session.teacher_name) {
-      response.teacher_name = session.teacher_name;
-    }
-    
+
     res.json(response);
-    
+
   } catch (error) {
     console.error('❌ PRODUCTION Error joining video session:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      error: 'Internal server error: ' + error.message 
+      error: 'Internal server error: ' + error.message
     });
   }
+});
 });
 
 // Leave Session - PRODUCTION READY
