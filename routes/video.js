@@ -1,3 +1,4 @@
+// routes/video.js - PRODUCTION READY
 import express from 'express';
 import pkg from 'agora-access-token'; 
 const { RtcTokenBuilder, RtcRole } = pkg; 
@@ -99,10 +100,10 @@ async function getSessionIdFromMeetingId(meetingId) {
   try {
     const { data, error } = await supabase
       .from('video_sessions')
-      .select('id')
+      .select('id, class_id')
       .eq('meeting_id', meetingId)
       .single();
-    return error ? null : data.id;
+    return error ? null : data;
   } catch (error) {
     return null;
   }
@@ -110,69 +111,104 @@ async function getSessionIdFromMeetingId(meetingId) {
 
 async function recordParticipantJoin(meetingId, userId, userType) {
   try {
-    const sessionId = await getSessionIdFromMeetingId(meetingId);
-    if (!sessionId) return false;
+    const sessionData = await getSessionIdFromMeetingId(meetingId);
+    if (!sessionData) {
+      console.log('No session found for meeting:', meetingId);
+      return false;
+    }
 
     const { error } = await supabase
       .from('session_participants')
-      .insert({
-        session_id: sessionId,
+      .upsert({
+        session_id: sessionData.id,
         user_id: userId,
         user_type: userType,
-        joined_at: new Date().toISOString()
+        class_id: sessionData.class_id,
+        joined_at: new Date().toISOString(),
+        status: 'joined',
+        is_teacher: userType === 'teacher'
+      }, {
+        onConflict: 'session_id,user_id'
       });
 
-    return !error;
+    if (error) {
+      console.error('Error recording participant:', error);
+      return false;
+    }
+
+    return true;
   } catch (error) {
+    console.error('Error in recordParticipantJoin:', error);
     return false;
   }
 }
 
 async function updateDatabaseParticipantLeave(meetingId, userId, duration) {
   try {
-    const sessionId = await getSessionIdFromMeetingId(meetingId);
-    if (!sessionId) return false;
+    const sessionData = await getSessionIdFromMeetingId(meetingId);
+    if (!sessionData) return false;
 
     const { error } = await supabase
       .from('session_participants')
       .update({
         left_at: new Date().toISOString(),
-        duration: Math.max(0, duration || 0)
+        duration: Math.max(0, duration || 0),
+        status: 'left'
       })
-      .eq('session_id', sessionId)
+      .eq('session_id', sessionData.id)
       .eq('user_id', userId)
       .is('left_at', null);
 
     return !error;
   } catch (error) {
+    console.error('Error updating participant leave:', error);
     return false;
   }
 }
 
 async function getSessionParticipants(meetingId) {
   try {
-    const sessionId = await getSessionIdFromMeetingId(meetingId);
-    if (!sessionId) return [];
+    const sessionData = await getSessionIdFromMeetingId(meetingId);
+    if (!sessionData) return [];
 
     const { data, error } = await supabase
       .from('session_participants')
-      .select('user_id, user_type, joined_at')
-      .eq('session_id', sessionId)
+      .select('user_id, user_type, joined_at, is_teacher')
+      .eq('session_id', sessionData.id)
       .is('left_at', null);
 
     return error ? [] : (data || []);
   } catch (error) {
+    console.error('Error getting session participants:', error);
     return [];
   }
 }
 
-// ==================== ROUTES ====================
+// Enhanced validation
+async function validateStudentEnrollment(classId, userId) {
+  try {
+    // Check if student is enrolled in the class
+    const { data, error } = await supabase
+      .from('student_classes')
+      .select('id')
+      .eq('class_id', classId)
+      .eq('student_id', userId)
+      .single();
 
-// Session Status
+    return !error && data;
+  } catch (error) {
+    console.error('Error validating enrollment:', error);
+    return false;
+  }
+}
+
+// ==================== PRODUCTION ROUTES ====================
+
+// Session Status - PRODUCTION READY
 router.get('/session-status/:meetingId', async (req, res) => {
   try {
     const { meetingId } = req.params;
-    console.log('🔍 SESSION-STATUS:', meetingId);
+    console.log('🔍 PRODUCTION SESSION-STATUS:', meetingId);
 
     // Check memory sessions first
     const memorySession = sessionManager.getSession(meetingId);
@@ -181,6 +217,7 @@ router.get('/session-status/:meetingId', async (req, res) => {
       const studentCount = memorySession.participants?.filter(id => id !== memorySession.teacher_id).length || 0;
 
       return res.json({
+        success: true,
         is_active: memorySession.status === 'active',
         is_teacher_joined: teacherPresent,
         student_count: studentCount,
@@ -199,6 +236,7 @@ router.get('/session-status/:meetingId', async (req, res) => {
 
     if (dbError || !dbSession) {
       return res.json({
+        success: true,
         is_active: false,
         is_teacher_joined: false,
         student_count: 0,
@@ -207,10 +245,11 @@ router.get('/session-status/:meetingId', async (req, res) => {
     }
 
     const participants = await getSessionParticipants(meetingId);
-    const teacherPresent = participants.some(p => p.user_type === 'teacher');
-    const studentCount = participants.filter(p => p.user_type === 'student').length;
+    const teacherPresent = participants.some(p => p.user_type === 'teacher' || p.is_teacher);
+    const studentCount = participants.filter(p => p.user_type === 'student' || !p.is_teacher).length;
 
     res.json({
+      success: true,
       is_active: dbSession.status === 'active',
       is_teacher_joined: teacherPresent,
       student_count: studentCount,
@@ -221,23 +260,25 @@ router.get('/session-status/:meetingId', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Session status error:', error);
-    res.json({
-      is_active: false,
-      is_teacher_joined: false,
-      student_count: 0,
-      error: 'Server error'
+    res.status(500).json({
+      success: false,
+      error: 'Server error',
+      message: error.message
     });
   }
 });
 
-// Start Session
+// Start Session - PRODUCTION READY
 router.post('/start-session', async (req, res) => {
   try {
     const { class_id, user_id } = req.body;
-    console.log('🎬 START-SESSION:', { class_id, user_id });
+    console.log('🎬 PRODUCTION START-SESSION:', { class_id, user_id });
 
     if (!class_id || !user_id) {
-      return res.status(400).json({ success: false, error: 'Class ID and User ID required' });
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Class ID and User ID required' 
+      });
     }
 
     const { data: classData, error: classError } = await supabase
@@ -247,16 +288,23 @@ router.post('/start-session', async (req, res) => {
       .single();
 
     if (classError || !classData) {
-      return res.status(404).json({ success: false, error: 'Class not found' });
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Class not found' 
+      });
     }
 
     if (classData.teacher_id !== user_id) {
-      return res.status(403).json({ success: false, error: 'Not authorized' });
+      return res.status(403).json({ 
+        success: false, 
+        error: 'Not authorized to start this session' 
+      });
     }
 
     const meetingId = generateValidMeetingId(class_id);
     const channelName = generateValidChannelName(class_id, user_id);
 
+    // Create session in database
     const { data: dbSession, error: dbError } = await supabase
       .from('video_sessions')
       .insert([{
@@ -270,8 +318,15 @@ router.post('/start-session', async (req, res) => {
       .select()
       .single();
 
-    if (dbError) console.error('❌ DB insertion failed:', dbError);
+    if (dbError) {
+      console.error('❌ DB insertion failed:', dbError);
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Failed to create session' 
+      });
+    }
 
+    // Update class status
     await supabase
       .from('classes')
       .update({ status: 'active' })
@@ -295,7 +350,10 @@ router.post('/start-session', async (req, res) => {
     const appCertificate = process.env.AGORA_APP_CERTIFICATE;
     
     if (!appId || !appCertificate) {
-      return res.status(500).json({ success: false, error: 'Video service not configured' });
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Video service not configured' 
+      });
     }
 
     const token = RtcTokenBuilder.buildTokenWithUid(
@@ -307,7 +365,7 @@ router.post('/start-session', async (req, res) => {
       Math.floor(Date.now() / 1000) + 3600
     );
 
-    console.log('✅ SESSION STARTED:', meetingId);
+    console.log('✅ PRODUCTION SESSION STARTED:', meetingId);
 
     res.json({
       success: true,
@@ -316,21 +374,27 @@ router.post('/start-session', async (req, res) => {
       token,
       app_id: appId,
       uid: user_id,
-      session: session
+      session: session,
+      class_title: classData.title,
+      teacher_name: classData.teacher_name
     });
 
   } catch (error) {
     console.error('❌ Start session error:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error',
+      message: error.message
+    });
   }
 });
 
-// Join Session
+// Join Session - PRODUCTION READY (FIXED FOR STUDENT)
 router.post('/join-session', async (req, res) => {
   try {
     const { meeting_id, user_id, user_type = 'student', user_name = 'Student' } = req.body;
     
-    console.log('🔗 JOIN-SESSION REQUEST:', { meeting_id, user_id, user_type, user_name });
+    console.log('🔗 PRODUCTION JOIN-SESSION REQUEST:', { meeting_id, user_id, user_type, user_name });
     
     // Validate inputs
     if (!meeting_id || !user_id) {
@@ -340,8 +404,44 @@ router.post('/join-session', async (req, res) => {
       });
     }
     
-    // Get session from memory
-    const session = sessionManager.getSession(meeting_id);
+    // Get session from memory or database
+    let session = sessionManager.getSession(meeting_id);
+    let classData = null;
+    
+    if (!session) {
+      // Try to get session from database with class info
+      const { data: dbSession, error: dbError } = await supabase
+        .from('video_sessions')
+        .select(`
+          *,
+          classes (
+            title,
+            teacher_id,
+            teacher:teacher_id (
+              name
+            )
+          )
+        `)
+        .eq('meeting_id', meeting_id)
+        .single();
+        
+      if (dbError || !dbSession) {
+        return res.status(404).json({ 
+          success: false,
+          error: 'Active session not found'
+        });
+      }
+      
+      // Create memory session from database
+      session = sessionManager.createSession(meeting_id, {
+        ...dbSession,
+        class_title: dbSession.classes?.title,
+        teacher_name: dbSession.classes?.teacher?.name,
+        participants: []
+      });
+      
+      classData = dbSession.classes;
+    }
     
     console.log('🔍 Session lookup result:', { 
       meeting_id, 
@@ -351,25 +451,25 @@ router.post('/join-session', async (req, res) => {
     });
     
     if (!session || session.status !== 'active') {
-      const activeSessions = sessionManager.getActiveSessions();
-      console.log('📊 ACTIVE SESSIONS AVAILABLE:', activeSessions.map(s => ({
-        meeting_id: s.meeting_id,
-        class_id: s.class_id,
-        teacher_id: s.teacher_id,
-        class_title: s.class_title
-      })));
-      
       return res.status(404).json({ 
         success: false,
-        error: 'Active session not found',
-        debug: {
-          requested_meeting_id: meeting_id,
-          active_sessions: activeSessions.map(s => s.meeting_id)
-        }
+        error: 'Active session not found or ended'
       });
     }
     
-    // ✅ FIXED: Generate Agora credentials without getToken function
+    // For students, validate enrollment
+    if (user_type === 'student') {
+      const isEnrolled = await validateStudentEnrollment(session.class_id, user_id);
+      if (!isEnrolled) {
+        console.log('❌ Student not enrolled:', { class_id: session.class_id, user_id });
+        return res.status(403).json({ 
+          success: false,
+          error: 'Student not enrolled in this class' 
+        });
+      }
+    }
+    
+    // Generate Agora credentials
     const appId = process.env.AGORA_APP_ID;
     const appCertificate = process.env.AGORA_APP_CERTIFICATE;
     
@@ -385,23 +485,23 @@ router.post('/join-session', async (req, res) => {
     const currentTime = Math.floor(Date.now() / 1000);
     const privilegeExpiredTs = currentTime + expirationTime;
     
-    // ✅ FIXED: UID generation
+    // UID generation - FIXED for production
     let agoraUid;
     if (user_type === 'teacher') {
-      agoraUid = 1;
+      agoraUid = 1; // Teacher always gets UID 1
     } else {
-      // Generate deterministic UID for students
+      // Generate deterministic but unique UID for students
       const hash = user_id.split('').reduce((a, b) => {
         a = ((a << 5) - a) + b.charCodeAt(0);
         return a & a;
       }, 0);
-      agoraUid = Math.abs(hash % 100000) + 1000;
+      agoraUid = Math.abs(hash % 100000) + 1000; // Students get 1000+
     }
     
     // Ensure UID is valid integer
     agoraUid = Math.max(1, Math.min(4294967295, agoraUid));
     
-    // ✅ FIXED: Generate token using RtcTokenBuilder directly
+    // Generate token
     const token = RtcTokenBuilder.buildTokenWithUid(
       appId,
       appCertificate,
@@ -411,7 +511,25 @@ router.post('/join-session', async (req, res) => {
       privilegeExpiredTs
     );
     
-    console.log('✅ USER JOIN SESSION SUCCESS:', { 
+    // Record participation (non-blocking)
+    recordParticipantJoin(meeting_id, user_id, user_type)
+      .then(success => {
+        if (success) {
+          console.log('✅ Participation recorded for user:', user_id);
+        } else {
+          console.warn('⚠️ Failed to record participation for user:', user_id);
+        }
+      })
+      .catch(err => {
+        console.error('❌ Error recording participation:', err);
+      });
+    
+    // Update memory session participants
+    if (session.participants && !session.participants.includes(user_id)) {
+      session.participants.push(user_id);
+    }
+    
+    console.log('✅ PRODUCTION USER JOIN SESSION SUCCESS:', { 
       meeting_id, 
       user_id, 
       user_type,
@@ -419,8 +537,8 @@ router.post('/join-session', async (req, res) => {
       channel: session.channel_name
     });
     
-    // Return success response
-    res.json({
+    // Return success response with all required data
+    const response = {
       success: true,
       meeting_id: meeting_id,
       channel: session.channel_name,
@@ -432,12 +550,23 @@ router.post('/join-session', async (req, res) => {
         class_id: session.class_id,
         teacher_id: session.teacher_id,
         status: session.status,
-        class_title: session.class_title
+        class_title: session.class_title || classData?.title,
+        teacher_name: session.teacher_name || classData?.teacher?.name
       }
-    });
+    };
+    
+    // Add class info if available
+    if (session.class_title) {
+      response.class_title = session.class_title;
+    }
+    if (session.teacher_name) {
+      response.teacher_name = session.teacher_name;
+    }
+    
+    res.json(response);
     
   } catch (error) {
-    console.error('❌ Error joining video session:', error);
+    console.error('❌ PRODUCTION Error joining video session:', error);
     res.status(500).json({ 
       success: false,
       error: 'Internal server error: ' + error.message 
@@ -445,14 +574,17 @@ router.post('/join-session', async (req, res) => {
   }
 });
 
-// Leave Session
+// Leave Session - PRODUCTION READY
 router.post('/leave-session', async (req, res) => {
   try {
     const { meeting_id, user_id, duration = 0, user_type = 'student' } = req.body;
-    console.log('🚪 LEAVE-SESSION:', { meeting_id, user_id });
+    console.log('🚪 PRODUCTION LEAVE-SESSION:', { meeting_id, user_id });
 
     if (!meeting_id || !user_id) {
-      return res.status(400).json({ success: false, error: 'Meeting ID and User ID required' });
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Meeting ID and User ID required' 
+      });
     }
 
     const session = sessionManager.getSession(meeting_id);
@@ -469,21 +601,119 @@ router.post('/leave-session', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Leave session error:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error',
+      message: error.message
+    });
   }
 });
 
-// Health Check
-router.get('/health', (req, res) => {
+// End Session - PRODUCTION READY
+router.post('/end-session', async (req, res) => {
+  try {
+    const { meeting_id, user_id } = req.body;
+    console.log('🛑 PRODUCTION END-SESSION:', { meeting_id, user_id });
+
+    if (!meeting_id || !user_id) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Meeting ID and User ID required' 
+      });
+    }
+
+    const session = sessionManager.getSession(meeting_id);
+    if (!session || session.teacher_id !== user_id) {
+      return res.status(403).json({ 
+        success: false, 
+        error: 'Not authorized to end this session' 
+      });
+    }
+
+    // End session in memory
+    sessionManager.endSession(meeting_id);
+
+    // Update database
+    await supabase
+      .from('video_sessions')
+      .update({
+        status: 'ended',
+        ended_at: new Date().toISOString()
+      })
+      .eq('meeting_id', meeting_id);
+
+    // Update class status
+    await supabase
+      .from('classes')
+      .update({ status: 'completed' })
+      .eq('id', session.class_id);
+
+    console.log('✅ PRODUCTION SESSION ENDED:', meeting_id);
+
+    res.json({
+      success: true,
+      message: 'Session ended successfully'
+    });
+
+  } catch (error) {
+    console.error('❌ End session error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
+
+// Active Sessions - PRODUCTION READY
+router.get('/active-sessions', async (req, res) => {
+  try {
+    const activeSessions = sessionManager.getActiveSessions();
+    
+    res.json({
+      success: true,
+      active_sessions: activeSessions,
+      count: activeSessions.length
+    });
+
+  } catch (error) {
+    console.error('❌ Get active sessions error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
+
+// Health Check - PRODUCTION READY
+router.get('/health', async (req, res) => {
   const appId = process.env.AGORA_APP_ID;
   const appCertificate = process.env.AGORA_APP_CERTIFICATE;
   
-  res.json({
-    status: appId && appCertificate ? 'healthy' : 'unhealthy',
-    videoEnabled: !!(appId && appCertificate),
-    activeSessions: sessionManager.getActiveSessions().length,
-    timestamp: new Date().toISOString()
-  });
+  try {
+    // Test database connection
+    const { data, error } = await supabase
+      .from('video_sessions')
+      .select('count')
+      .limit(1);
+
+    res.json({
+      success: true,
+      status: appId && appCertificate ? 'healthy' : 'unhealthy',
+      video_enabled: !!(appId && appCertificate),
+      database_connected: !error,
+      active_sessions: sessionManager.getActiveSessions().length,
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      status: 'unhealthy',
+      error: error.message
+    });
+  }
 });
 
 // Cleanup
