@@ -420,7 +420,7 @@ const validateStudentAccess = async (classId, studentId) => {
   }
 };
 
-// Join Session - PRODUCTION READY (FIXED FOR STUDENT)
+// Join Session - PRODUCTION READY (
 router.post('/join-session', async (req, res) => {
   try {
     const { meeting_id, user_id, user_type = 'student', user_name = 'Student' } = req.body;
@@ -578,6 +578,7 @@ router.post('/join-session', async (req, res) => {
       channel: session.channel_name,
       token,
       appId: appId,
+      app_id: appId,
       uid: agoraUid,
       sessionInfo: { 
         id: session.id,
