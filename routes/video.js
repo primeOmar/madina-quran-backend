@@ -636,6 +636,167 @@ router.post('/leave-session', async (req, res) => {
   }
 });
 
+router.post('/record-participation', authenticateToken, async (req, res) => {
+  try {
+    const {
+      session_id,
+      student_id,
+      is_teacher,
+      joined_at,
+      left_at,
+      status,
+      connection_quality,
+      duration,
+      device_info,
+      class_id,
+      error_details
+    } = req.body;
+
+    // Validate required fields
+    if (!session_id || !student_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: session_id and student_id are required'
+      });
+    }
+
+    // Validate session exists
+    const { data: session, error: sessionError } = await supabase
+      .from('video_sessions')
+      .select('id, class_id, meeting_id')
+      .eq('id', session_id)
+      .single();
+
+    if (sessionError || !session) {
+      return res.status(404).json({
+        success: false,
+        error: 'Video session not found'
+      });
+    }
+
+    // Validate student exists (if not using temp IDs)
+    if (!student_id.startsWith('temp_')) {
+      const { data: student, error: studentError } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('id', student_id)
+        .single();
+
+      if (studentError && !student) {
+        return res.status(404).json({
+          success: false,
+          error: 'Student not found'
+        });
+      }
+    }
+
+    // Prepare participation data
+    const participationData = {
+      session_id: session_id,
+      student_id: student_id,
+      is_teacher: is_teacher || false,
+      status: status || 'joined',
+      connection_quality: connection_quality || 'unknown',
+      device_info: device_info || {},
+      class_id: class_id || session.class_id,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+
+    // Add optional fields if provided
+    if (joined_at) participationData.joined_at = joined_at;
+    if (left_at) participationData.left_at = left_at;
+    if (duration !== undefined) participationData.duration = duration;
+    if (error_details) participationData.error_details = error_details;
+
+    // Check if participation record already exists
+    const { data: existingParticipation } = await supabase
+      .from('session_participants')
+      .select('id')
+      .eq('session_id', session_id)
+      .eq('student_id', student_id)
+      .single();
+
+    let result;
+    if (existingParticipation) {
+      // Update existing record
+      const { data, error } = await supabase
+        .from('session_participants')
+        .update(participationData)
+        .eq('id', existingParticipation.id)
+        .select()
+        .single();
+
+      if (error) throw error;
+      result = data;
+    } else {
+      // Create new record
+      const { data, error } = await supabase
+        .from('session_participants')
+        .insert(participationData)
+        .select()
+        .single();
+
+      if (error) throw error;
+      result = data;
+    }
+
+    // Update session participant count
+    await updateSessionParticipantCount(session_id);
+
+    console.log('✅ Participation recorded successfully:', {
+      session_id,
+      student_id,
+      status: participationData.status,
+      duration: participationData.duration
+    });
+
+    res.json({
+      success: true,
+      data: result,
+      message: 'Participation recorded successfully'
+    });
+
+  } catch (error) {
+    console.error('❌ Error recording participation:', error);
+    
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Helper function to update session participant count
+async function updateSessionParticipantCount(sessionId) {
+  try {
+    const { data: participants, error } = await supabase
+      .from('session_participants')
+      .select('id, is_teacher, status')
+      .eq('session_id', sessionId);
+
+    if (error) throw error;
+
+    const studentCount = participants.filter(p => !p.is_teacher && p.status === 'joined').length;
+    const teacherCount = participants.filter(p => p.is_teacher && p.status === 'joined').length;
+
+    await supabase
+      .from('video_sessions')
+      .update({
+        participant_count: studentCount + teacherCount,
+        student_count: studentCount,
+        teacher_count: teacherCount,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', sessionId);
+
+  } catch (error) {
+    console.error('Error updating participant count:', error);
+  }
+}
+
+
 // End Session - PRODUCTION READY
 router.post('/end-session', async (req, res) => {
   try {
