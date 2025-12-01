@@ -2,10 +2,10 @@
 // Additional Video Session API Endpoints
 // ============================================
 
-const express = require('express');
-const router = express.Router();
-const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
-const { createClient } = require('@supabase/supabase-js');
+import express from 'express';
+import pkg from 'agora-access-token';
+const { RtcTokenBuilder, RtcRole } = pkg;
+import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -14,6 +14,8 @@ const supabase = createClient(
 
 const AGORA_APP_ID = process.env.AGORA_APP_ID;
 const AGORA_APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE;
+
+const router = express.Router();
 
 // ============================================
 // POST /api/agora/generate-token
@@ -556,4 +558,4 @@ router.post('/start-recording', async (req, res) => {
 });
 
 
-module.exports = router;
+export default router;
