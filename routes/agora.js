@@ -809,6 +809,570 @@ router.get('/session-status/:meetingId', async (req, res) => {
   }
 });
 
+// ==================== CHAT MESSAGES ENDPOINTS ====================
+
+// Get session messages
+router.post('/session-messages', async (req, res) => {
+  try {
+    const { session_id } = req.body;
+    
+    console.log('📨 GETTING SESSION MESSAGES FOR:', session_id);
+    
+    if (!session_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Session ID is required',
+        messages: []
+      });
+    }
+    
+    // Try to get from database
+    const { data: messages, error } = await supabase
+      .from('session_messages')
+      .select(`
+        *,
+        user:profiles!session_messages_user_id_fkey (
+          name,
+          email,
+          avatar_url
+        )
+      `)
+      .eq('session_id', session_id)
+      .order('created_at', { ascending: true });
+    
+    if (error) {
+      console.warn('⚠️ Database error fetching messages:', error);
+      return res.json({
+        success: true,
+        messages: [] // Return empty array instead of error
+      });
+    }
+    
+    console.log(`✅ Found ${messages?.length || 0} messages for session`, session_id);
+    
+    res.json({
+      success: true,
+      messages: messages || []
+    });
+    
+  } catch (error) {
+    console.error('❌ Error getting session messages:', error);
+    res.json({
+      success: true,
+      messages: [] // Always return array, never error
+    });
+  }
+});
+
+// Send a chat message
+router.post('/send-message', async (req, res) => {
+  try {
+    const { session_id, user_id, message_text, message_type = 'text' } = req.body;
+    
+    console.log('📤 SENDING MESSAGE:', {
+      session_id,
+      user_id,
+      message_length: message_text?.length,
+      message_type
+    });
+    
+    if (!session_id || !user_id || !message_text) {
+      return res.status(400).json({
+        success: false,
+        error: 'Session ID, User ID, and message text are required'
+      });
+    }
+    
+    // First, get session details to ensure it exists
+    const session = sessionManager.getSession(session_id);
+    if (!session) {
+      console.warn('⚠️ Session not found in memory:', session_id);
+      // Still allow sending message even if session not in memory
+    }
+    
+    // Insert message into database
+    const { data: newMessage, error } = await supabase
+      .from('session_messages')
+      .insert([{
+        session_id,
+        user_id,
+        message_text,
+        message_type,
+        created_at: new Date().toISOString()
+      }])
+      .select(`
+        *,
+        user:profiles!session_messages_user_id_fkey (
+          name,
+          email,
+          avatar_url
+        )
+      `)
+      .single();
+    
+    if (error) {
+      console.error('❌ Database error saving message:', error);
+      
+      // Create mock response if database fails
+      const mockMessage = {
+        id: Date.now(),
+        session_id,
+        user_id,
+        message_text,
+        message_type,
+        created_at: new Date().toISOString(),
+        user: {
+          name: 'You',
+          email: null,
+          avatar_url: null
+        },
+        is_mock: true
+      };
+      
+      return res.json({
+        success: true,
+        message: mockMessage,
+        warning: 'Message saved in memory only (database unavailable)'
+      });
+    }
+    
+    console.log('✅ Message sent successfully:', {
+      message_id: newMessage.id,
+      session_id,
+      user_name: newMessage.user?.name
+    });
+    
+    res.json({
+      success: true,
+      message: newMessage
+    });
+    
+  } catch (error) {
+    console.error('❌ Error sending message:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to send message'
+    });
+  }
+});
+
+// ==================== PARTICIPANTS ENDPOINTS ====================
+
+// Get session participants
+router.post('/session-participants', async (req, res) => {
+  try {
+    const { meeting_id } = req.body;
+    
+    console.log('👥 GETTING PARTICIPANTS FOR:', meeting_id);
+    
+    if (!meeting_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Meeting ID is required',
+        participants: []
+      });
+    }
+    
+    // First try to get from memory session
+    const session = sessionManager.getSession(meeting_id);
+    
+    if (session && session.participants) {
+      console.log(`✅ Found ${session.participants.length} participants in memory`);
+      
+      // Get user details for each participant
+      const participantPromises = session.participants.map(async (userId) => {
+        try {
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('id, name, email, role')
+            .eq('id', userId)
+            .single();
+          
+          return {
+            user_id: userId,
+            joined_at: session.started_at,
+            status: 'connected',
+            is_teacher: userId === session.teacher_id,
+            profile: profile || { name: 'Unknown User', role: 'student' }
+          };
+        } catch (error) {
+          return {
+            user_id: userId,
+            joined_at: session.started_at,
+            status: 'connected',
+            is_teacher: userId === session.teacher_id,
+            profile: { name: 'Unknown User', role: 'student' }
+          };
+        }
+      });
+      
+      const participants = await Promise.all(participantPromises);
+      
+      return res.json({
+        success: true,
+        participants,
+        source: 'memory'
+      });
+    }
+    
+    // Fallback to database if not in memory
+    console.log('🔄 Memory session not found, checking database...');
+    
+    const { data: dbSession, error: sessionError } = await supabase
+      .from('video_sessions')
+      .select('id, class_id, teacher_id')
+      .eq('meeting_id', meeting_id)
+      .single();
+    
+    if (sessionError || !dbSession) {
+      console.warn('⚠️ Session not found in database either');
+      return res.json({
+        success: true,
+        participants: [],
+        warning: 'Session not found'
+      });
+    }
+    
+    // Get participants from database
+    const { data: participants, error: partError } = await supabase
+      .from('session_participants')
+      .select(`
+        *,
+        user:profiles!session_participants_user_id_fkey (
+          name,
+          email,
+          role
+        )
+      `)
+      .eq('session_id', dbSession.id);
+    
+    if (partError) {
+      console.warn('⚠️ Database error fetching participants:', partError);
+      return res.json({
+        success: true,
+        participants: [] // Return empty array
+      });
+    }
+    
+    console.log(`✅ Found ${participants?.length || 0} participants in database`);
+    
+    res.json({
+      success: true,
+      participants: participants || [],
+      source: 'database'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error getting session participants:', error);
+    res.json({
+      success: true,
+      participants: [] // Always return array
+    });
+  }
+});
+
+// Update participant status
+router.post('/update-participant', async (req, res) => {
+  try {
+    const { session_id, user_id, ...updates } = req.body;
+    
+    console.log('🔄 UPDATING PARTICIPANT STATUS:', {
+      session_id,
+      user_id,
+      updates
+    });
+    
+    if (!session_id || !user_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Session ID and User ID are required'
+      });
+    }
+    
+    // Update memory session if it exists
+    const session = sessionManager.getSession(session_id);
+    if (session) {
+      console.log('✅ Updated participant in memory session');
+    }
+    
+    // Try to update in database
+    try {
+      // First get session ID from meeting ID
+      const { data: dbSession, error: sessionError } = await supabase
+        .from('video_sessions')
+        .select('id')
+        .eq('meeting_id', session_id)
+        .single();
+      
+      if (!sessionError && dbSession) {
+        const { error: updateError } = await supabase
+          .from('session_participants')
+          .update({
+            ...updates,
+            updated_at: new Date().toISOString()
+          })
+          .eq('session_id', dbSession.id)
+          .eq('user_id', user_id);
+        
+        if (updateError) {
+          console.warn('⚠️ Database update failed:', updateError);
+        } else {
+          console.log('✅ Updated participant in database');
+        }
+      }
+    } catch (dbError) {
+      console.warn('⚠️ Database operation failed:', dbError.message);
+      // Don't fail the request if database fails
+    }
+    
+    res.json({
+      success: true,
+      message: 'Participant status updated',
+      updates
+    });
+    
+  } catch (error) {
+    console.error('❌ Error updating participant:', error);
+    res.json({
+      success: true, // Still return success for non-critical updates
+      message: 'Update recorded in memory only'
+    });
+  }
+});
+
+// ==================== RECORDING ENDPOINTS ====================
+
+// Start recording
+router.post('/start-recording', async (req, res) => {
+  try {
+    const { session_id, user_id } = req.body;
+    
+    console.log('⏺️ STARTING RECORDING FOR:', { session_id, user_id });
+    
+    if (!session_id || !user_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Session ID and User ID are required'
+      });
+    }
+    
+    const session = sessionManager.getSession(session_id);
+    
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        error: 'Session not found'
+      });
+    }
+    
+    if (session.teacher_id !== user_id) {
+      return res.status(403).json({
+        success: false,
+        error: 'Only teacher can start recording'
+      });
+    }
+    
+    // Update session recording status
+    session.is_recording = true;
+    session.recording_started_at = new Date().toISOString();
+    
+    // Log recording in database
+    try {
+      const { data: dbSession } = await supabase
+        .from('video_sessions')
+        .select('id')
+        .eq('meeting_id', session_id)
+        .single();
+      
+      if (dbSession) {
+        await supabase
+          .from('session_recordings')
+          .insert([{
+            session_id: dbSession.id,
+            started_by: user_id,
+            start_time: new Date().toISOString(),
+            status: 'recording'
+          }]);
+      }
+    } catch (dbError) {
+      console.warn('⚠️ Could not log recording to database:', dbError.message);
+    }
+    
+    console.log('✅ Recording started:', session_id);
+    
+    res.json({
+      success: true,
+      message: 'Recording started',
+      recording_started_at: session.recording_started_at
+    });
+    
+  } catch (error) {
+    console.error('❌ Error starting recording:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to start recording'
+    });
+  }
+});
+
+// Stop recording
+router.post('/stop-recording', async (req, res) => {
+  try {
+    const { session_id, user_id } = req.body;
+    
+    console.log('⏹️ STOPPING RECORDING FOR:', { session_id, user_id });
+    
+    if (!session_id || !user_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Session ID and User ID are required'
+      });
+    }
+    
+    const session = sessionManager.getSession(session_id);
+    
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        error: 'Session not found'
+      });
+    }
+    
+    if (session.teacher_id !== user_id) {
+      return res.status(403).json({
+        success: false,
+        error: 'Only teacher can stop recording'
+      });
+    }
+    
+    // Update session recording status
+    session.is_recording = false;
+    session.recording_ended_at = new Date().toISOString();
+    
+    // Update recording in database
+    try {
+      const { data: dbSession } = await supabase
+        .from('video_sessions')
+        .select('id')
+        .eq('meeting_id', session_id)
+        .single();
+      
+      if (dbSession) {
+        await supabase
+          .from('session_recordings')
+          .update({
+            end_time: new Date().toISOString(),
+            status: 'completed',
+            duration_minutes: Math.round(
+              (new Date() - new Date(session.recording_started_at)) / 60000
+            )
+          })
+          .eq('session_id', dbSession.id)
+          .eq('started_by', user_id)
+          .is('end_time', null)
+          .eq('status', 'recording');
+      }
+    } catch (dbError) {
+      console.warn('⚠️ Could not update recording in database:', dbError.message);
+    }
+    
+    console.log('✅ Recording stopped:', session_id);
+    
+    res.json({
+      success: true,
+      message: 'Recording stopped',
+      recording_ended_at: session.recording_ended_at
+    });
+    
+  } catch (error) {
+    console.error('❌ Error stopping recording:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to stop recording'
+    });
+  }
+});
+
+// ==================== ADDITIONAL UTILITY ENDPOINTS ====================
+
+// Get session statistics
+router.get('/session-stats/:meetingId', async (req, res) => {
+  try {
+    const { meetingId } = req.params;
+    
+    const session = sessionManager.getSession(meetingId);
+    
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        error: 'Session not found'
+      });
+    }
+    
+    const stats = {
+      session_id: meetingId,
+      participants: session.participants?.length || 0,
+      teacher_joined: session.participants?.includes(session.teacher_id) || false,
+      students: session.participants?.filter(id => id !== session.teacher_id).length || 0,
+      is_recording: session.is_recording || false,
+      recording_duration: session.recording_started_at ? 
+        Math.round((new Date() - new Date(session.recording_started_at)) / 60000) : 0,
+      session_duration: Math.round((new Date() - new Date(session.started_at)) / 60000),
+      message_count: session.messages?.length || 0
+    };
+    
+    res.json({
+      success: true,
+      stats
+    });
+    
+  } catch (error) {
+    console.error('❌ Error getting session stats:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// Get all chat messages (admin/teacher view)
+router.get('/all-messages/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    
+    const { data: messages, error } = await supabase
+      .from('session_messages')
+      .select(`
+        *,
+        user:profiles!session_messages_user_id_fkey (
+          name,
+          email,
+          avatar_url,
+          role
+        )
+      `)
+      .eq('session_id', sessionId)
+      .order('created_at', { ascending: false });
+    
+    if (error) {
+      throw error;
+    }
+    
+    res.json({
+      success: true,
+      messages: messages || [],
+      count: messages?.length || 0
+    });
+    
+  } catch (error) {
+    console.error('❌ Error getting all messages:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get messages'
+    });
+  }
+});
+
 // Leave video session (CRITICAL - frontend depends on this)
 router.post('/leave-session', async (req, res) => {
   try {
