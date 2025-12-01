@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "compression": "^1.8.1",
+     "@supabase/supabase-js": "^2.39.3",
     "cors": "^2.8.5",
     "dotenv": "^17.2.2",
     "express": "^5.1.0",
