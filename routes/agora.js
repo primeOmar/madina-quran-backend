@@ -51,7 +51,18 @@ class SessionManager {
     }
     return null;
   }
-  
+
+  endSession(meetingId) {
+    console.log('🛑 Ending session in memory:', meetingId);
+    const session = this.sessions.get(meetingId);
+    if (session) {
+      session.status = 'ended';
+      session.ended_at = new Date().toISOString();
+      console.log('✅ Session ended in memory:', meetingId);
+    } else {
+      console.warn('⚠️ Session not found in memory for ending:', meetingId);
+    }
+  }
   getActiveSessions() {
     const active = [];
     for (const [meetingId, session] of this.sessions.entries()) {
@@ -612,22 +623,69 @@ router.post('/end-session', async (req, res) => {
 
     console.log('🛑 END-SESSION REQUEST:', { meeting_id, user_id });
 
-    if (!meeting_id) {
+    if (!meeting_id || !user_id) {
       return res.status(400).json({
         success: false,
-        error: 'Meeting ID is required'
+        error: 'Meeting ID and User ID are required'
       });
     }
 
     const session = sessionManager.getSession(meeting_id);
 
     if (!session) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found'
+      console.log('🔄 Session not in memory, checking database...');
+      
+      // Try to find session in database
+      const { data: dbSession, error: dbError } = await supabase
+        .from('video_sessions')
+        .select('*, classes(title, teacher_id)')
+        .eq('meeting_id', meeting_id)
+        .single();
+
+      if (dbError || !dbSession) {
+        return res.status(404).json({
+          success: false,
+          error: 'Session not found'
+        });
+      }
+
+      // Check authorization
+      if (dbSession.teacher_id !== user_id) {
+        return res.status(403).json({
+          success: false,
+          error: 'Only the teacher can end this session'
+        });
+      }
+
+      // Update database
+      const { error: updateError } = await supabase
+        .from('video_sessions')
+        .update({
+          status: 'ended',
+          ended_at: new Date().toISOString()
+        })
+        .eq('meeting_id', meeting_id);
+
+      if (updateError) {
+        console.error('❌ Database update failed:', updateError);
+      }
+
+      // Update class status
+      await supabase
+        .from('classes')
+        .update({ status: 'scheduled' })
+        .eq('id', dbSession.class_id);
+
+      console.log('✅ SESSION ENDED FROM DATABASE:', meeting_id);
+
+      return res.json({
+        success: true,
+        message: 'Session ended successfully',
+        db_updated: !updateError
       });
     }
 
+    // If session found in memory, continue with original logic
     if (session.teacher_id !== user_id) {
       return res.status(403).json({
         success: false,
@@ -642,8 +700,7 @@ router.post('/end-session', async (req, res) => {
       .from('video_sessions')
       .update({
         status: 'ended',
-        ended_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
+        ended_at: new Date().toISOString()
       })
       .eq('meeting_id', meeting_id)
       .eq('teacher_id', user_id);
@@ -653,12 +710,13 @@ router.post('/end-session', async (req, res) => {
     }
 
     // ✅ UPDATE CLASS STATUS BACK TO SCHEDULED:
-    console.log('🔄 Updating class status to scheduled...');
+    console.log('🔄 Updating class status to finished...');
     await supabase
       .from('classes')
-      .update({ status: 'scheduled' })
+      .update({ status: 'Finished' })
       .eq('id', session.class_id);
 
+    // ✅ FIX: Call the method properly (it should exist now)
     sessionManager.endSession(meeting_id);
 
     console.log('✅ SESSION ENDED:', meeting_id);
@@ -667,20 +725,17 @@ router.post('/end-session', async (req, res) => {
       success: true,
       message: 'Session ended successfully',
       session: session,
-      db_updated: !dbError,
-      is_memory_session: true
+      db_updated: !dbError
     });
 
   } catch (error) {
     console.error('❌ Error ending video session:', error);
     res.status(500).json({
       success: false,
-      error: 'Internal server error'
+      error: 'Internal server error: ' + error.message
     });
   }
-});
-
-// ==================== DEBUG & MONITORING ====================
+});// ==================== DEBUG & MONITORING ====================
 
 // Get active sessions
 router.get('/active-sessions', async (req, res) => {
@@ -1374,11 +1429,12 @@ router.get('/all-messages/:sessionId', async (req, res) => {
 });
 
 // Leave video session (CRITICAL - frontend depends on this)
+// Leave video session (CRITICAL - frontend depends on this) - UPDATED
 router.post('/leave-session', async (req, res) => {
   try {
-    const { meeting_id, user_id, duration = 0, user_type = 'student' } = req.body;
+    const { meeting_id, user_id } = req.body;
 
-    console.log('🚪 LEAVE-SESSION REQUEST:', { meeting_id, user_id, duration, user_type });
+    console.log('🚪 LEAVE-SESSION REQUEST:', { meeting_id, user_id });
 
     if (!meeting_id || !user_id) {
       return res.status(400).json({
@@ -1387,14 +1443,24 @@ router.post('/leave-session', async (req, res) => {
       });
     }
 
+    // Get session from memory
     const session = sessionManager.getSession(meeting_id);
 
     if (!session) {
-      console.log('⚠️ Session not found in memory, but allowing leave anyway');
+      console.log('⚠️ Session not found in memory, allowing leave anyway');
       return res.json({
         success: true,
-        message: 'Session left (session not found)'
+        message: 'Session left successfully'
       });
+    }
+
+    // Check if user is teacher
+    const isTeacher = session.teacher_id === user_id;
+    
+    if (isTeacher) {
+      console.log('👨‍🏫 Teacher is leaving the session');
+      // For teacher leaving, we might want different logic
+      // But for now, just remove from participants
     }
 
     // Remove user from participants
@@ -1403,55 +1469,55 @@ router.post('/leave-session', async (req, res) => {
       console.log('✅ Removed user from participants:', user_id);
     }
 
-    // Record leave in database if possible
+    // Try to update database
     try {
       const { data: dbSession } = await supabase
         .from('video_sessions')
-        .select('id')
+        .select('id, teacher_id')
         .eq('meeting_id', meeting_id)
         .single();
 
       if (dbSession) {
-        await supabase
-          .from('video_session_participants')
-          .update({
-            status: 'left',
-            left_at: new Date().toISOString(),
-            duration_minutes: Math.round(duration / 60)
-          })
-          .eq('session_id', dbSession.id)
-          .eq('student_id', user_id)
-          .is('left_at', null);
-
-        console.log('✅ Recorded leave in database');
+        // If teacher is leaving, update session status
+        if (isTeacher) {
+          await supabase
+            .from('video_sessions')
+            .update({
+              status: 'ended',
+              ended_at: new Date().toISOString()
+            })
+            .eq('id', dbSession.id);
+          
+          console.log('✅ Updated session status to ended');
+        }
       }
     } catch (dbError) {
-      console.warn('⚠️ Could not record leave in database:', dbError.message);
+      console.warn('⚠️ Could not update database:', dbError.message);
     }
 
     console.log('✅ USER LEFT SESSION:', {
       meeting_id,
       user_id,
+      isTeacher,
       remaining_participants: session.participants?.length || 0
     });
 
     res.json({
       success: true,
       message: 'Successfully left video session',
+      isTeacher: isTeacher,
+      sessionEnded: isTeacher,
       remaining_participants: session.participants?.length || 0
     });
 
   } catch (error) {
     console.error('❌ Error leaving video session:', error);
-    // Always return success for leave operations
     res.json({
       success: true,
       message: 'Left session (with errors)'
     });
   }
 });
-
-
 
 // Get session info (useful for debugging)
 router.get('/session-info/:meetingId', async (req, res) => {
