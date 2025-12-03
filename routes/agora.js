@@ -19,7 +19,9 @@ class SessionManager {
       lastActivity: Date.now(),
       created: Date.now(),
       participants: sessionData.participants || [],
-      agora_uids: sessionData.agora_uids || {} // Map user_id to agora uid
+      agora_uids: sessionData.agora_uids || {},
+      teacher_joined: sessionData.teacher_joined || false,
+      teacher_agora_uid: sessionData.teacher_agora_uid || null
     };
     
     this.sessions.set(meetingId, session);
@@ -64,14 +66,20 @@ class SessionManager {
     }
   }
   
-  addParticipant(meetingId, userId, agoraUid) {
+  addParticipant(meetingId, userId, agoraUid, isTeacher = false) {
     const session = this.sessions.get(meetingId);
     if (session) {
       if (!session.participants.includes(userId)) {
         session.participants.push(userId);
       }
       session.agora_uids[userId] = agoraUid;
-      console.log('➕ Added participant:', { meetingId, userId, agoraUid });
+      
+      if (isTeacher) {
+        session.teacher_joined = true;
+        session.teacher_agora_uid = agoraUid;
+      }
+      
+      console.log('➕ Added participant:', { meetingId, userId, agoraUid, isTeacher });
       return true;
     }
     return false;
@@ -82,6 +90,12 @@ class SessionManager {
     if (session) {
       session.participants = session.participants.filter(id => id !== userId);
       delete session.agora_uids[userId];
+      
+      if (userId === session.teacher_id) {
+        session.teacher_joined = false;
+        delete session.teacher_agora_uid;
+      }
+      
       console.log('➖ Removed participant:', { meetingId, userId });
       return true;
     }
@@ -95,8 +109,7 @@ class SessionManager {
   
   isTeacherPresent(meetingId) {
     const session = this.sessions.get(meetingId);
-    if (!session) return false;
-    return session.participants.includes(session.teacher_id);
+    return session ? session.teacher_joined : false;
   }
 
   getActiveSessions() {
@@ -146,6 +159,16 @@ function generateValidMeetingId(classId) {
   const shortClassId = classId.substring(0, 8);
   const timestamp = Date.now();
   return `class_${shortClassId}_${timestamp}`;
+}
+
+function generateUniqueAgoraUid() {
+  // Agora UID range: 1 to 4294967295
+  // Avoid UID 1 as it might be problematic
+  let uid;
+  do {
+    uid = Math.floor(Math.random() * 100000) + 1000; // 1000-100999
+  } while (uid === 1);
+  return uid;
 }
 
 // ==================== START SESSION (TEACHER) ====================
@@ -205,27 +228,10 @@ router.post('/start-session', async (req, res) => {
 
     if (dbError) {
       console.error('❌ Database insertion failed:', dbError);
-      // Fallback without agenda
-      const { data: fallbackSession, error: fallbackError } = await supabase
-        .from('video_sessions')
-        .insert([{
-          meeting_id: meetingId,
-          class_id: class_id,
-          teacher_id: user_id,
-          channel_name: channelName,
-          status: 'active',
-          started_at: new Date().toISOString()
-        }])
-        .select()
-        .single();
-
-      if (fallbackError) {
-        console.error('❌ Fallback insertion also failed:', fallbackError);
-        return res.status(500).json({
-          success: false,
-          error: 'Failed to create session in database'
-        });
-      }
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to create session in database'
+      });
     }
 
     // Update class status to active
@@ -271,7 +277,34 @@ router.post('/start-session', async (req, res) => {
       console.error('❌ Notification sending failed:', notifError);
     }
 
-    // Create session in memory
+    // ========== GENERATE TEACHER TOKEN IMMEDIATELY ==========
+    const appId = process.env.AGORA_APP_ID;
+    const appCertificate = process.env.AGORA_APP_CERTIFICATE;
+
+    if (!appId || !appCertificate) {
+      return res.status(500).json({
+        success: false,
+        error: 'Video service not configured'
+      });
+    }
+
+    // Generate unique Agora UID for teacher
+    const teacherUid = generateUniqueAgoraUid();
+    
+    const expirationTime = 3600;
+    const currentTime = Math.floor(Date.now() / 1000);
+    const privilegeExpiredTs = currentTime + expirationTime;
+
+    const token = RtcTokenBuilder.buildTokenWithUid(
+      appId,
+      appCertificate,
+      channelName,
+      teacherUid,
+      RtcRole.PUBLISHER,
+      privilegeExpiredTs
+    );
+
+    // Create session in memory WITH TEACHER ALREADY JOINED
     const sessionData = {
       id: meetingId,
       class_id,
@@ -282,26 +315,36 @@ router.post('/start-session', async (req, res) => {
       class_title: classData.title,
       participants: [user_id],
       db_session_id: dbSession?.id,
-      agora_uids: {}
+      agora_uids: {},
+      teacher_joined: true,
+      teacher_agora_uid: teacherUid
     };
 
     sessionManager.createSession(meetingId, sessionData);
+    
+    // Add teacher to participants in session manager
+    sessionManager.addParticipant(meetingId, user_id, teacherUid, true);
 
-    console.log('✅ SESSION STARTED SUCCESSFULLY:', {
+    console.log('✅ TEACHER SESSION STARTED SUCCESSFULLY:', {
       meetingId,
       channelName,
       teacher: user_id,
-      students_notified: notifiedStudents
+      teacherUid,
+      tokenLength: token?.length
     });
 
     res.json({
       success: true,
       meeting_id: meetingId,
       channel: channelName,
-      app_id: process.env.AGORA_APP_ID,
+      token: token,
+      app_id: appId,
+      uid: teacherUid,
+      user_type: 'teacher',
+      is_teacher: true,
       teacher_id: user_id,
       class_title: classData.title,
-      db_session_created: !!dbSession,
+      db_session_created: true,
       students_notified: notifiedStudents
     });
 
@@ -314,22 +357,20 @@ router.post('/start-session', async (req, res) => {
   }
 });
 
-// ==================== UNIFIED JOIN SESSION (BOTH TEACHER & STUDENT) ====================
+// ==================== UNIFIED JOIN SESSION ====================
 router.post('/join-session', async (req, res) => {
   try {
     const { 
       meeting_id, 
       user_id, 
       user_type = 'teacher',
-      user_name = '',
       require_enrollment = false
     } = req.body;
 
     console.log('🔗 JOIN-SESSION REQUEST:', { 
       meeting_id, 
       user_id, 
-      user_type,
-      user_name 
+      user_type
     });
 
     if (!meeting_id || !user_id) {
@@ -383,7 +424,8 @@ router.post('/join-session', async (req, res) => {
         class_title: dbSession.classes?.title,
         participants: [],
         db_session_id: dbSession.id,
-        agora_uids: {}
+        agora_uids: {},
+        teacher_joined: false
       });
     }
 
@@ -417,16 +459,10 @@ router.post('/join-session', async (req, res) => {
           });
         }
       }
-    }
-
-    // Check if teacher is present (for students)
-    const teacherPresent = sessionManager.isTeacherPresent(cleanMeetingId);
-    if (!isTeacher && !teacherPresent) {
-      return res.status(400).json({
-        success: false,
-        error: 'Teacher has not joined the session yet. Please wait for teacher to start.',
-        code: 'TEACHER_NOT_JOINED',
-        canRetry: true
+      
+      console.log('🎓 Student joining - teacher status:', {
+        teacherJoined: session.teacher_joined,
+        teacherId: session.teacher_id
       });
     }
 
@@ -445,12 +481,14 @@ router.post('/join-session', async (req, res) => {
     // Generate Agora UID
     let agoraUid;
     if (isTeacher) {
-      agoraUid = 1; // Teacher always gets UID 1
+      // Teacher gets unique UID
+      agoraUid = generateUniqueAgoraUid();
     } else {
-      // Generate unique UID for student (not 1)
+      // Student gets unique UID
       do {
-        agoraUid = Math.floor(Math.random() * 100000) + 1000; // 1000-100999
-      } while (agoraUid === 1 || Object.values(session.agora_uids || {}).includes(agoraUid));
+        agoraUid = generateUniqueAgoraUid();
+      } while (agoraUid === session.teacher_agora_uid || 
+               Object.values(session.agora_uids || {}).includes(agoraUid));
     }
 
     const expirationTime = 3600;
@@ -467,7 +505,7 @@ router.post('/join-session', async (req, res) => {
     );
 
     // Add participant to session
-    sessionManager.addParticipant(cleanMeetingId, user_id, agoraUid);
+    sessionManager.addParticipant(cleanMeetingId, user_id, agoraUid, isTeacher);
 
     // Log participant in database
     try {
@@ -492,12 +530,12 @@ router.post('/join-session', async (req, res) => {
       success: true,
       meeting_id: cleanMeetingId,
       channel: session.channel_name,
-      token,
+      token: token,
       app_id: appId,
       uid: agoraUid,
       user_type: isTeacher ? 'teacher' : 'student',
       is_teacher: isTeacher,
-      teacher_present: teacherPresent,
+      teacher_present: session.teacher_joined,
       session: {
         id: session.id,
         meeting_id: cleanMeetingId,
@@ -531,7 +569,7 @@ router.post('/join-session', async (req, res) => {
       user_id,
       user_type,
       agora_uid: agoraUid,
-      teacher_present: teacherPresent
+      teacher_present: session.teacher_joined
     });
 
     res.json(response);
@@ -546,7 +584,7 @@ router.post('/join-session', async (req, res) => {
   }
 });
 
-// ==================== END SESSION (TEACHER ONLY) ====================
+// ==================== END SESSION ====================
 router.post('/end-session', async (req, res) => {
   try {
     const { meeting_id, user_id } = req.body;
@@ -718,7 +756,7 @@ router.post('/leave-session', async (req, res) => {
   }
 });
 
-// ==================== SESSION STATUS & INFO ====================
+// ==================== SESSION INFO ENDPOINTS ====================
 router.get('/session-status/:meetingId', async (req, res) => {
   try {
     const { meetingId } = req.params;
@@ -752,6 +790,70 @@ router.get('/session-status/:meetingId', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error checking session status:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+router.get('/session-info/:meetingId', async (req, res) => {
+  try {
+    const { meetingId } = req.params;
+    const session = sessionManager.getSession(meetingId);
+
+    if (!session) {
+      // Check database
+      const { data: dbSession } = await supabase
+        .from('video_sessions')
+        .select(`
+          *,
+          classes (
+            title,
+            teacher_id
+          )
+        `)
+        .eq('meeting_id', meetingId)
+        .single();
+
+      if (!dbSession) {
+        return res.status(404).json({
+          success: false,
+          error: 'Session not found'
+        });
+      }
+
+      return res.json({
+        success: true,
+        session: {
+          meeting_id: dbSession.meeting_id,
+          class_id: dbSession.class_id,
+          teacher_id: dbSession.teacher_id,
+          status: dbSession.status,
+          channel_name: dbSession.channel_name,
+          started_at: dbSession.started_at,
+          class_title: dbSession.classes?.title
+        }
+      });
+    }
+
+    res.json({
+      success: true,
+      session: {
+        meeting_id: meetingId,
+        class_id: session.class_id,
+        teacher_id: session.teacher_id,
+        status: session.status,
+        channel_name: session.channel_name,
+        started_at: session.started_at,
+        class_title: session.class_title,
+        participants: session.participants || [],
+        teacher_joined: session.teacher_joined
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error getting session info:', error);
     res.status(500).json({
       success: false,
       error: 'Internal server error'
@@ -940,6 +1042,506 @@ router.post('/validate-student-join', async (req, res) => {
   }
 });
 
+// ==================== PARTICIPANTS MANAGEMENT ====================
+router.post('/session-participants', async (req, res) => {
+  try {
+    const { meeting_id } = req.body;
+    
+    if (!meeting_id) {
+      return res.json({
+        success: true,
+        participants: []
+      });
+    }
+    
+    const session = sessionManager.getSession(meeting_id);
+    
+    if (!session) {
+      return res.json({
+        success: true,
+        participants: []
+      });
+    }
+
+    // Get user details for participants
+    const participantDetails = [];
+    
+    for (const userId of session.participants) {
+      try {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('id, name, email, avatar_url, role')
+          .eq('id', userId)
+          .single();
+        
+        participantDetails.push({
+          user_id: userId,
+          agora_uid: session.agora_uids[userId] || null,
+          role: userId === session.teacher_id ? 'teacher' : 'student',
+          joined_at: session.started_at,
+          profile: profile || { name: 'Unknown User' },
+          is_teacher: userId === session.teacher_id
+        });
+      } catch (error) {
+        // Skip if profile not found
+      }
+    }
+
+    res.json({
+      success: true,
+      participants: participantDetails,
+      count: participantDetails.length
+    });
+
+  } catch (error) {
+    console.error('❌ Error getting participants:', error);
+    res.json({
+      success: true,
+      participants: []
+    });
+  }
+});
+
+router.post('/update-participant', async (req, res) => {
+  try {
+    const { session_id, user_id, ...updates } = req.body;
+    
+    console.log('🔄 Updating participant:', { session_id, user_id, updates });
+    
+    // Update in database
+    const { error } = await supabase
+      .from('session_participants')
+      .update({
+        ...updates,
+        updated_at: new Date().toISOString()
+      })
+      .eq('session_id', session_id)
+      .eq('user_id', user_id);
+
+    if (error) {
+      console.warn('⚠️ Database update failed:', error);
+      return res.json({
+        success: false,
+        error: error.message
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Participant updated'
+    });
+
+  } catch (error) {
+    console.error('❌ Error updating participant:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// ==================== CHAT MESSAGES ====================
+router.post('/session-messages', async (req, res) => {
+  try {
+    const { session_id, meeting_id, limit = 100 } = req.body;
+    
+    console.log('💬 GETTING SESSION MESSAGES:', { 
+      session_id, 
+      meeting_id,
+      timestamp: new Date().toISOString()
+    });
+    
+    // Use either session_id or meeting_id
+    let sessionIdentifier = session_id;
+    
+    if (!sessionIdentifier && meeting_id) {
+      // Get session ID from meeting ID
+      const { data: videoSession } = await supabase
+        .from('video_sessions')
+        .select('id')
+        .eq('meeting_id', meeting_id)
+        .single();
+      
+      if (videoSession) {
+        sessionIdentifier = videoSession.id;
+      }
+    }
+    
+    if (!sessionIdentifier) {
+      console.warn('⚠️ No session identifier provided for messages');
+      return res.json({
+        success: true,
+        messages: [],
+        count: 0
+      });
+    }
+    
+    // Get messages from database with user profiles
+    const { data: messages, error } = await supabase
+      .from('session_messages')
+      .select(`
+        id,
+        session_id,
+        user_id,
+        message_text,
+        message_type,
+        created_at,
+        updated_at,
+        profiles!session_messages_user_id_fkey (
+          id,
+          name,
+          avatar_url,
+          role
+        )
+      `)
+      .eq('session_id', sessionIdentifier)
+      .order('created_at', { ascending: true })
+      .limit(limit);
+    
+    if (error) {
+      console.error('❌ Database error fetching messages:', error);
+      return res.json({
+        success: false,
+        error: 'Failed to fetch messages',
+        messages: []
+      });
+    }
+    
+    console.log(`✅ Retrieved ${messages?.length || 0} messages for session`, sessionIdentifier);
+    
+    // Format messages with user info
+    const formattedMessages = (messages || []).map(msg => ({
+      id: msg.id,
+      session_id: msg.session_id,
+      user_id: msg.user_id,
+      senderId: msg.user_id,
+      senderName: msg.profiles?.name || 'Unknown User',
+      senderRole: msg.profiles?.role || 'student',
+      avatar: msg.profiles?.avatar_url,
+      text: msg.message_text,
+      message_text: msg.message_text,
+      message_type: msg.message_type || 'text',
+      timestamp: msg.created_at,
+      created_at: msg.created_at,
+      profiles: {
+        id: msg.profiles?.id,
+        name: msg.profiles?.name,
+        avatar_url: msg.profiles?.avatar_url,
+        role: msg.profiles?.role
+      }
+    }));
+    
+    res.json({
+      success: true,
+      messages: formattedMessages,
+      count: formattedMessages.length,
+      session_id: sessionIdentifier
+    });
+    
+  } catch (error) {
+    console.error('❌ Error getting session messages:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      messages: []
+    });
+  }
+});
+
+router.post('/send-message', async (req, res) => {
+  try {
+    const { 
+      session_id, 
+      meeting_id, 
+      user_id, 
+      message_text, 
+      message_type = 'text',
+      user_role = 'student' 
+    } = req.body;
+    
+    console.log('📤 SENDING REAL MESSAGE:', {
+      session_id,
+      meeting_id,
+      user_id,
+      message_length: message_text?.length,
+      message_type,
+      user_role,
+      timestamp: new Date().toISOString()
+    });
+    
+    if (!message_text || (!session_id && !meeting_id) || !user_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: session_id/meeting_id, user_id, message_text'
+      });
+    }
+    
+    // Clean message text
+    const cleanedMessage = message_text.trim();
+    if (cleanedMessage.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Message cannot be empty'
+      });
+    }
+    
+    let actualSessionId = session_id;
+    
+    // If using meeting_id, get the session ID
+    if (!actualSessionId && meeting_id) {
+      const { data: videoSession, error: sessionError } = await supabase
+        .from('video_sessions')
+        .select('id, meeting_id, teacher_id')
+        .eq('meeting_id', meeting_id)
+        .single();
+      
+      if (sessionError || !videoSession) {
+        return res.status(404).json({
+          success: false,
+          error: 'Session not found'
+        });
+      }
+      
+      actualSessionId = videoSession.id;
+      
+      // Verify user is part of this session (teacher or enrolled student)
+      if (user_id !== videoSession.teacher_id) {
+        const { data: enrollment } = await supabase
+          .from('students_classes')
+          .select('student_id')
+          .eq('class_id', (await supabase
+            .from('video_sessions')
+            .select('class_id')
+            .eq('id', actualSessionId)
+            .single()
+          )?.data?.class_id)
+          .eq('student_id', user_id)
+          .single();
+        
+        if (!enrollment) {
+          return res.status(403).json({
+            success: false,
+            error: 'You are not enrolled in this class'
+          });
+        }
+      }
+    }
+    
+    // Insert message into database
+    const { data: newMessage, error: insertError } = await supabase
+      .from('session_messages')
+      .insert([{
+        session_id: actualSessionId,
+        user_id: user_id,
+        message_text: cleanedMessage,
+        message_type: message_type,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }])
+      .select(`
+        id,
+        session_id,
+        user_id,
+        message_text,
+        message_type,
+        created_at,
+        profiles!session_messages_user_id_fkey (
+          id,
+          name,
+          avatar_url,
+          role
+        )
+      `)
+      .single();
+    
+    if (insertError) {
+      console.error('❌ Database error inserting message:', insertError);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to save message to database'
+      });
+    }
+    
+    // Format the response
+    const formattedMessage = {
+      id: newMessage.id,
+      session_id: newMessage.session_id,
+      user_id: newMessage.user_id,
+      senderId: newMessage.user_id,
+      senderName: newMessage.profiles?.name || (user_role === 'teacher' ? 'Teacher' : 'Student'),
+      senderRole: newMessage.profiles?.role || user_role,
+      avatar: newMessage.profiles?.avatar_url,
+      text: newMessage.message_text,
+      message_text: newMessage.message_text,
+      message_type: newMessage.message_type,
+      timestamp: newMessage.created_at,
+      created_at: newMessage.created_at,
+      profiles: newMessage.profiles
+    };
+    
+    console.log('✅ Message sent successfully:', {
+      message_id: newMessage.id,
+      session_id: actualSessionId,
+      user_name: formattedMessage.senderName,
+      message_type: formattedMessage.message_type
+    });
+    
+    res.json({
+      success: true,
+      message: formattedMessage,
+      session_id: actualSessionId
+    });
+    
+  } catch (error) {
+    console.error('❌ Error sending message:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// ==================== RECORDING ENDPOINTS ====================
+router.post('/start-recording', async (req, res) => {
+  try {
+    const { session_id, user_id } = req.body;
+    
+    console.log('⏺️ STARTING RECORDING FOR:', { session_id, user_id });
+    
+    if (!session_id || !user_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Session ID and User ID are required'
+      });
+    }
+    
+    // Check if user is teacher
+    const { data: session } = await supabase
+      .from('video_sessions')
+      .select('teacher_id')
+      .eq('id', session_id)
+      .single();
+    
+    if (!session || session.teacher_id !== user_id) {
+      return res.status(403).json({
+        success: false,
+        error: 'Only teacher can start recording'
+      });
+    }
+    
+    // Log recording in database
+    const { data: recording, error } = await supabase
+      .from('session_recordings')
+      .insert([{
+        session_id: session_id,
+        started_by: user_id,
+        start_time: new Date().toISOString(),
+        status: 'recording'
+      }])
+      .select()
+      .single();
+    
+    if (error) {
+      console.error('❌ Database error starting recording:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to start recording'
+      });
+    }
+    
+    console.log('✅ Recording started:', session_id);
+    
+    res.json({
+      success: true,
+      message: 'Recording started',
+      recording_id: recording.id,
+      start_time: recording.start_time
+    });
+    
+  } catch (error) {
+    console.error('❌ Error starting recording:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to start recording'
+    });
+  }
+});
+
+router.post('/stop-recording', async (req, res) => {
+  try {
+    const { session_id, user_id } = req.body;
+    
+    console.log('⏹️ STOPPING RECORDING FOR:', { session_id, user_id });
+    
+    if (!session_id || !user_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Session ID and User ID are required'
+      });
+    }
+    
+    // Get active recording
+    const { data: activeRecording } = await supabase
+      .from('session_recordings')
+      .select('*')
+      .eq('session_id', session_id)
+      .eq('started_by', user_id)
+      .is('end_time', null)
+      .eq('status', 'recording')
+      .single();
+    
+    if (!activeRecording) {
+      return res.status(404).json({
+        success: false,
+        error: 'No active recording found'
+      });
+    }
+    
+    // Calculate duration
+    const startTime = new Date(activeRecording.start_time);
+    const endTime = new Date();
+    const durationMinutes = Math.round((endTime - startTime) / 60000);
+    
+    // Update recording
+    const { error } = await supabase
+      .from('session_recordings')
+      .update({
+        end_time: endTime.toISOString(),
+        status: 'completed',
+        duration_minutes: durationMinutes
+      })
+      .eq('id', activeRecording.id);
+    
+    if (error) {
+      console.error('❌ Database error stopping recording:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to stop recording'
+      });
+    }
+    
+    console.log('✅ Recording stopped:', {
+      session_id,
+      duration_minutes: durationMinutes
+    });
+    
+    res.json({
+      success: true,
+      message: 'Recording stopped',
+      recording_id: activeRecording.id,
+      end_time: endTime.toISOString(),
+      duration_minutes: durationMinutes
+    });
+    
+  } catch (error) {
+    console.error('❌ Error stopping recording:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to stop recording'
+    });
+  }
+});
+
 // ==================== DEBUG & UTILITY ENDPOINTS ====================
 router.get('/active-sessions', async (req, res) => {
   try {
@@ -1033,6 +1635,123 @@ router.post('/generate-token', async (req, res) => {
   } catch (error) {
     console.error('Token generation error:', error);
     res.json({ token: null });
+  }
+});
+
+// ==================== SESSION RECOVERY ====================
+router.get('/session-recovery/:meetingId', async (req, res) => {
+  try {
+    const { meetingId } = req.params;
+    
+    console.log('🔄 Session recovery check:', meetingId);
+    
+    // Check memory
+    const memorySession = sessionManager.getSession(meetingId);
+    
+    // Check database
+    const { data: dbSession, error } = await supabase
+      .from('video_sessions')
+      .select(`
+        *,
+        classes (
+          title,
+          teacher_id
+        )
+      `)
+      .eq('meeting_id', meetingId)
+      .single();
+
+    const recoveryData = {
+      meeting_id: meetingId,
+      in_memory: !!memorySession,
+      memory_status: memorySession?.status,
+      memory_teacher: memorySession?.teacher_id,
+      in_database: !!dbSession,
+      db_status: dbSession?.status,
+      db_teacher: dbSession?.teacher_id,
+      db_channel: dbSession?.channel_name,
+      db_started: dbSession?.started_at,
+      class_title: dbSession?.classes?.title
+    };
+
+    console.log('📊 Session recovery data:', recoveryData);
+
+    // If found in database but not memory, restore it
+    if (dbSession && !memorySession && dbSession.status === 'active') {
+      console.log('🔄 Restoring session from database to memory...');
+      const restoredSession = sessionManager.createSession(meetingId, {
+        id: dbSession.id,
+        class_id: dbSession.class_id,
+        teacher_id: dbSession.teacher_id,
+        status: 'active',
+        started_at: dbSession.started_at,
+        channel_name: dbSession.channel_name,
+        class_title: dbSession.classes?.title,
+        participants: [dbSession.teacher_id],
+        db_session_id: dbSession.id
+      });
+      
+      recoveryData.restored_session = restoredSession;
+      recoveryData.restored = true;
+    }
+
+    res.json({
+      success: true,
+      ...recoveryData
+    });
+
+  } catch (error) {
+    console.error('❌ Session recovery error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// ==================== GENERATE TOKEN ONLY ====================
+router.post('/generate-token-only', async (req, res) => {
+  try {
+    const { channelName, uid, role = 'publisher' } = req.body;
+
+    const appId = process.env.AGORA_APP_ID;
+    const appCertificate = process.env.AGORA_APP_CERTIFICATE;
+
+    if (!appId || !appCertificate) {
+      return res.status(500).json({
+        success: false,
+        error: 'Agora credentials not configured'
+      });
+    }
+
+    const expirationTime = 3600;
+    const currentTime = Math.floor(Date.now() / 1000);
+    const privilegeExpiredTs = currentTime + expirationTime;
+
+    const token = RtcTokenBuilder.buildTokenWithUid(
+      appId,
+      appCertificate,
+      channelName,
+      uid,
+      role === 'publisher' ? RtcRole.PUBLISHER : RtcRole.SUBSCRIBER,
+      privilegeExpiredTs
+    );
+
+    res.json({
+      success: true,
+      token,
+      appId,
+      channelName,
+      uid,
+      expirationTime
+    });
+
+  } catch (error) {
+    console.error('❌ Token generation error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to generate token'
+    });
   }
 });
 
