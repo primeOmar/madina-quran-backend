@@ -1257,7 +1257,7 @@ router.post('/send-message', async (req, res) => {
     if (!actualSessionId && meeting_id) {
       const { data: videoSession, error: sessionError } = await supabase
         .from('video_sessions')
-        .select('id, meeting_id, teacher_id')
+        .select('id, meeting_id, teacher_id, class_id')
         .eq('meeting_id', meeting_id)
         .single();
       
@@ -1270,27 +1270,8 @@ router.post('/send-message', async (req, res) => {
       
       actualSessionId = videoSession.id;
       
-      // Verify user is part of this session (teacher or enrolled student)
-      if (user_id !== videoSession.teacher_id) {
-        const { data: enrollment } = await supabase
-          .from('students_classes')
-          .select('student_id')
-          .eq('class_id', (await supabase
-            .from('video_sessions')
-            .select('class_id')
-            .eq('id', actualSessionId)
-            .single()
-          )?.data?.class_id)
-          .eq('student_id', user_id)
-          .single();
-        
-        if (!enrollment) {
-          return res.status(403).json({
-            success: false,
-            error: 'You are not enrolled in this class'
-          });
-        }
-      }
+      // REMOVED ENROLLMENT CHECK - ANYONE CAN SEND MESSAGES
+      // No enrollment validation needed
     }
     
     // Insert message into database
