@@ -357,17 +357,16 @@ router.post('/start-session', async (req, res) => {
   }
 });
 
-// ==================== UNIFIED JOIN SESSION ====================
+// ==================== UNIFIED JOIN SESSION (NO VALIDATION FOR STUDENTS) ====================
 router.post('/join-session', async (req, res) => {
   try {
     const { 
       meeting_id, 
       user_id, 
-      user_type = 'teacher',
-      require_enrollment = false
+      user_type = 'teacher'
     } = req.body;
 
-    console.log('🔗 JOIN-SESSION REQUEST:', { 
+    console.log('🔗 JOIN-SESSION REQUEST (NO VALIDATION):', { 
       meeting_id, 
       user_id, 
       user_type
@@ -431,7 +430,7 @@ router.post('/join-session', async (req, res) => {
 
     const isTeacher = user_type === 'teacher';
     
-    // ========== TEACHER VALIDATION ==========
+    // ========== TEACHER VALIDATION ONLY ==========
     if (isTeacher) {
       if (session.teacher_id !== user_id) {
         return res.status(403).json({
@@ -441,28 +440,15 @@ router.post('/join-session', async (req, res) => {
         });
       }
     } 
-    // ========== STUDENT VALIDATION ==========
+    // ========== STUDENT: NO VALIDATION REQUIRED ==========
+    // Any student can join with the meeting ID
     else {
-      if (require_enrollment) {
-        const { data: enrollment, error: enrollmentError } = await supabase
-          .from('students_classes')
-          .select('*')
-          .eq('class_id', session.class_id)
-          .eq('student_id', user_id)
-          .single();
-
-        if (enrollmentError || !enrollment) {
-          return res.status(403).json({
-            success: false,
-            error: 'You are not enrolled in this class',
-            code: 'NOT_ENROLLED'
-          });
-        }
-      }
-      
-      console.log('🎓 Student joining - teacher status:', {
-        teacherJoined: session.teacher_joined,
-        teacherId: session.teacher_id
+      console.log('🎓 Student joining - NO ENROLLMENT CHECK:', {
+        user_id,
+        meeting_id: cleanMeetingId,
+        teacher_joined: session.teacher_joined,
+        teacher_present: session.teacher_joined,
+        welcome_message: 'Any student can join with the meeting link'
       });
     }
 
@@ -507,7 +493,7 @@ router.post('/join-session', async (req, res) => {
     // Add participant to session
     sessionManager.addParticipant(cleanMeetingId, user_id, agoraUid, isTeacher);
 
-    // Log participant in database
+    // Log participant in database (optional - for tracking)
     try {
       await supabase
         .from('session_participants')
@@ -517,12 +503,14 @@ router.post('/join-session', async (req, res) => {
           role: isTeacher ? 'teacher' : 'student',
           status: 'joined',
           joined_at: new Date().toISOString(),
-          agora_uid: agoraUid
+          agora_uid: agoraUid,
+          // Mark as guest if you want to track unenrolled students
+          is_guest: !isTeacher // You might want to add enrollment check here if tracking
         }, {
           onConflict: 'session_id,user_id'
         });
     } catch (dbError) {
-      console.warn('⚠️ Database logging failed:', dbError.message);
+      console.warn('⚠️ Database logging failed (not critical):', dbError.message);
     }
 
     // ========== BUILD RESPONSE ==========
@@ -536,6 +524,7 @@ router.post('/join-session', async (req, res) => {
       user_type: isTeacher ? 'teacher' : 'student',
       is_teacher: isTeacher,
       teacher_present: session.teacher_joined,
+      welcome_message: isTeacher ? 'Welcome Teacher!' : 'Welcome Student! You can join the call even without camera/mic permissions.',
       session: {
         id: session.id,
         meeting_id: cleanMeetingId,
@@ -548,7 +537,7 @@ router.post('/join-session', async (req, res) => {
       }
     };
 
-    // Add enrollment status for students
+    // Optional: Check enrollment for informational purposes (not for blocking)
     if (!isTeacher) {
       try {
         const { data: enrollment } = await supabase
@@ -559,17 +548,20 @@ router.post('/join-session', async (req, res) => {
           .single();
         
         response.enrolled = !!enrollment;
+        response.is_guest = !enrollment; // Track if guest student
       } catch (e) {
         response.enrolled = false;
+        response.is_guest = true;
       }
     }
 
-    console.log('✅ JOIN SUCCESSFUL:', {
+    console.log('✅ JOIN SUCCESSFUL (NO VALIDATION):', {
       meeting_id: cleanMeetingId,
       user_id,
       user_type,
       agora_uid: agoraUid,
-      teacher_present: session.teacher_joined
+      teacher_present: session.teacher_joined,
+      message: 'Student joined without enrollment validation'
     });
 
     res.json(response);
@@ -583,7 +575,6 @@ router.post('/join-session', async (req, res) => {
     });
   }
 });
-
 // ==================== END SESSION ====================
 router.post('/end-session', async (req, res) => {
   try {
@@ -952,36 +943,12 @@ router.get('/session-by-class/:classId', async (req, res) => {
   }
 });
 
-// ==================== VALIDATE STUDENT JOIN ====================
+// ==================== VALIDATE STUDENT JOIN (NO VALIDATION) ====================
 router.post('/validate-student-join', async (req, res) => {
   try {
     const { class_id, student_id, meeting_id } = req.body;
 
-    console.log('🔐 Validating student join:', { class_id, student_id, meeting_id });
-
-    if (!class_id || !student_id) {
-      return res.status(400).json({
-        success: false,
-        error: 'Class ID and Student ID are required',
-        code: 'MISSING_PARAMS'
-      });
-    }
-
-    // Check enrollment
-    const { data: enrollment } = await supabase
-      .from('students_classes')
-      .select('*')
-      .eq('class_id', class_id)
-      .eq('student_id', student_id)
-      .single();
-
-    if (!enrollment) {
-      return res.status(403).json({
-        success: false,
-        error: 'You are not enrolled in this class',
-        code: 'NOT_ENROLLED'
-      });
-    }
+    console.log('🔐 Validating student join (NO VALIDATION):', { class_id, student_id, meeting_id });
 
     // Find session
     let session = null;
@@ -1026,9 +993,9 @@ router.post('/validate-student-join', async (req, res) => {
       channel: session.channel_name,
       teacher_present: teacherPresent,
       validation: {
-        enrolled: true,
         session_active: true,
-        teacher_present: teacherPresent
+        teacher_present: teacherPresent,
+        message: 'Anyone can join with the meeting link'
       }
     });
 
@@ -1041,7 +1008,6 @@ router.post('/validate-student-join', async (req, res) => {
     });
   }
 });
-
 // ==================== PARTICIPANTS MANAGEMENT ====================
 router.post('/session-participants', async (req, res) => {
   try {
