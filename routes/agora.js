@@ -307,6 +307,7 @@ router.post('/start-session', async (req, res) => {
     // Create session in memory WITH TEACHER ALREADY JOINED
     const sessionData = {
       id: meetingId,
+      meeting_id: meetingId,
       class_id,
       teacher_id: user_id,
       status: 'active',
@@ -333,20 +334,36 @@ router.post('/start-session', async (req, res) => {
       tokenLength: token?.length
     });
 
-    res.json({
+    // ========== UPDATED RESPONSE WITH CORRECT FIELD NAMES ==========
+    const responseData = {
       success: true,
-      meeting_id: meetingId,
+      meetingId: meetingId,            
       channel: channelName,
       token: token,
-      app_id: appId,
+      appId: appId,                 
       uid: teacherUid,
+      session: sessionData,         
+      class_title: classData.title,
+      role: 'teacher',                
+      
+      // Keep backward compatibility with snake_case
+      meeting_id: meetingId,
+      app_id: appId,
       user_type: 'teacher',
       is_teacher: true,
       teacher_id: user_id,
-      class_title: classData.title,
       db_session_created: true,
       students_notified: notifiedStudents
+    };
+
+    console.log('📤 Sending response with field mapping:', {
+      meetingId: responseData.meetingId,
+      appId: responseData.appId,
+      hasSession: !!responseData.session,
+      role: responseData.role
     });
+
+    res.json(responseData);
 
   } catch (error) {
     console.error('❌ Error starting video session:', error);
@@ -356,7 +373,6 @@ router.post('/start-session', async (req, res) => {
     });
   }
 });
-
 // ==================== UNIFIED JOIN SESSION (NO VALIDATION FOR STUDENTS) ====================
 router.post('/join-session', async (req, res) => {
   try {
@@ -513,28 +529,40 @@ router.post('/join-session', async (req, res) => {
       console.warn('⚠️ Database logging failed (not critical):', dbError.message);
     }
 
-    // ========== BUILD RESPONSE ==========
+    // ========== BUILD RESPONSE WITH BOTH FORMATS ==========
     const response = {
+      // Frontend expects these camelCase fields:
       success: true,
-      meeting_id: cleanMeetingId,
+      meetingId: cleanMeetingId,
       channel: session.channel_name,
       token: token,
-      app_id: appId,
+      appId: appId,
       uid: agoraUid,
-      user_type: isTeacher ? 'teacher' : 'student',
-      is_teacher: isTeacher,
-      teacher_present: session.teacher_joined,
-      welcome_message: isTeacher ? 'Welcome Teacher!' : 'Welcome Student! You can join the call even without camera/mic permissions.',
+      role: isTeacher ? 'teacher' : 'student',  // Frontend expects 'role'
+      
+      // Session object as expected by frontend
       session: {
         id: session.id,
         meeting_id: cleanMeetingId,
+        meetingId: cleanMeetingId,  // Add both formats
         class_id: session.class_id,
         teacher_id: session.teacher_id,
         status: session.status,
         class_title: session.class_title,
         channel_name: session.channel_name,
         participants_count: sessionManager.getParticipantCount(cleanMeetingId)
-      }
+      },
+      
+      // Other fields for frontend
+      class_title: session.class_title,
+      
+      // Backward compatibility with snake_case
+      meeting_id: cleanMeetingId,
+      app_id: appId,
+      user_type: isTeacher ? 'teacher' : 'student',
+      is_teacher: isTeacher,
+      teacher_present: session.teacher_joined,
+      welcome_message: isTeacher ? 'Welcome Teacher!' : 'Welcome Student! You can join the call even without camera/mic permissions.',
     };
 
     // Optional: Check enrollment for informational purposes (not for blocking)
@@ -556,11 +584,13 @@ router.post('/join-session', async (req, res) => {
     }
 
     console.log('✅ JOIN SUCCESSFUL (NO VALIDATION):', {
-      meeting_id: cleanMeetingId,
+      meetingId: cleanMeetingId,
+      appId: appId,
       user_id,
-      user_type,
+      role: response.role,
       agora_uid: agoraUid,
       teacher_present: session.teacher_joined,
+      hasSession: !!response.session,
       message: 'Student joined without enrollment validation'
     });
 
