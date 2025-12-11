@@ -216,41 +216,60 @@ router.post('/generate-fresh-token', async (req, res) => {
   }
 });
 
-// ==================== START SESSION (TEACHER) - DYNAMIC ====================
+// ==================== START SESSION (TEACHER)  ====================
 router.post('/start-session', async (req, res) => {
   try {
     const { class_id, user_id, requested_meeting_id, requested_channel_name } = req.body;
     
-    console.log('TEACHER STARTING SESSION:', {
+    console.log('🎯 TEACHER STARTING PRODUCTION SESSION:', {
       class_id,
       user_id,
       requested_meeting_id,
       requested_channel_name,
-      hasRequestedId: !!requested_meeting_id
+      hasRequestedId: !!requested_meeting_id,
+      timestamp: new Date().toISOString()
     });
 
-    // Generate dynamic IDs
-    const timestamp = Date.now();
+    // ========== VERIFY AGORA CONFIGURATION FIRST ==========
+    const appId = process.env.AGORA_APP_ID;
+    const appCertificate = process.env.AGORA_APP_CERTIFICATE;
+
+    console.log('🔐 Agora Configuration Check:', {
+      hasAppId: !!appId,
+      appIdLength: appId?.length,
+      hasCertificate: !!appCertificate,
+      certificateLength: appCertificate?.length,
+      appIdPrefix: appId ? appId.substring(0, 8) + '...' : 'NOT SET'
+    });
+
+    if (!appId || !appCertificate) {
+      return res.status(500).json({
+        success: false,
+        error: 'Agora video service not configured',
+        hint: 'Check AGORA_APP_ID and AGORA_APP_CERTIFICATE environment variables',
+        code: 'AGORA_CONFIG_MISSING'
+      });
+    }
+
+    // ========== GENERATE DYNAMIC IDs ==========
     const meetingId = requested_meeting_id || `class_${class_id.replace(/-/g, '_')}_teacher_${user_id.substring(0, 8)}`;
     const channelName = requested_channel_name || generateShortChannelName(class_id, user_id);
 
-// Add this helper function:
-function generateShortChannelName(classId, userId) {
-  // Create a hash of classId + userId to make it shorter
-  const shortClassId = classId.substring(0, 8);
-  const shortUserId = userId.substring(0, 8);
-  const timestamp = Date.now().toString(36); 
-  
-  // Max 64 chars: "ch_" + shortClassId + "_" + shortUserId + "_" + timestamp
-  return `ch_${shortClassId}_${shortUserId}_${timestamp}`.substring(0, 64);
-}
-    console.log('🔄 GENERATED DYNAMIC IDs:', {
+    function generateShortChannelName(classId, userId) {
+      const shortClassId = classId.substring(0, 8);
+      const shortUserId = userId.substring(0, 8);
+      const timestamp = Date.now().toString(36).substring(0, 6);
+      return `ch_${shortClassId}_${shortUserId}_${timestamp}`.substring(0, 64);
+    }
+
+    console.log('🔄 Generated Dynamic IDs:', {
       meetingId,
       channelName,
-      teacherId: user_id
+      teacherId: user_id,
+      channelLength: channelName.length
     });
 
-    // Generate access code (6 characters)
+    // ========== GENERATE ACCESS CODE ==========
     const generateAccessCode = () => {
       const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
       let code = '';
@@ -262,15 +281,14 @@ function generateShortChannelName(classId, userId) {
 
     const accessCode = generateAccessCode();
 
-    // 1. Check for existing active session
-    const { data: existingSession, error: findError } = await supabase
+    // ========== CHECK FOR EXISTING SESSION ==========
+    let sessionData;
+    const { data: existingSession } = await supabase
       .from('video_sessions')
       .select('*')
       .eq('class_id', class_id)
       .eq('status', 'active')
       .maybeSingle();
-
-    let sessionData;
 
     if (existingSession) {
       // Update existing session
@@ -308,7 +326,7 @@ function generateShortChannelName(classId, userId) {
 
       if (createError) {
         console.error('❌ Database error:', createError);
-        throw new Error('Failed to create session in database: ' + createError.message);
+        throw new Error(`Database error: ${createError.message}`);
       }
 
       if (!newSession) {
@@ -319,51 +337,173 @@ function generateShortChannelName(classId, userId) {
       console.log('✅ Created new session:', sessionData.meeting_id);
     }
 
-    // Generate Agora token (if using Agora)
-    const appId = process.env.AGORA_APP_ID;
-    const appCertificate = process.env.AGORA_APP_CERTIFICATE;
-    const uid = 0; // Teacher UID
-    const role = RtcRole.PUBLISHER;
-    const expireTime = 3600; // 1 hour
+    // ========== GENERATE AGORA TOKEN (PRODUCTION READY) ==========
+    let token = null;
+    let agoraUid = null;
+    let tokenError = null;
 
-    const token = appId && appCertificate ? 
-      RtcTokenBuilder.buildTokenWithUid(appId, appCertificate, channelName, uid, role, expireTime) : 
-      'demo_token';
+    try {
+      // Generate unique Agora UID for teacher
+      agoraUid = generateUniqueAgoraUid();
+      
+      // Ensure UID is not 0 or 1
+      while (agoraUid === 0 || agoraUid === 1) {
+        agoraUid = generateUniqueAgoraUid();
+      }
 
-    res.json({
-  success: true,
-  meetingId: sessionData.meeting_id,
-  channel: sessionData.channel_name, 
-  channelName: sessionData.channel_name, 
-  accessCode: sessionData.access_code,
-  token: token,
-  appId: appId,
-  uid: uid,
-  teacherId: user_id,
-  message: existingSession ? 'Rejoined existing session' : 'Session created successfully'
-});
+      const expirationTime = 3600; // 1 hour
+      const currentTime = Math.floor(Date.now() / 1000);
+      const privilegeExpiredTs = currentTime + expirationTime;
+
+      console.log('🔑 Generating Agora Token:', {
+        appId: appId.substring(0, 8) + '...',
+        certificateLength: appCertificate.length,
+        channel: channelName,
+        uid: agoraUid,
+        role: 'publisher',
+        expiresAt: new Date(privilegeExpiredTs * 1000).toISOString()
+      });
+
+      // Generate token using correct method
+      token = RtcTokenBuilder.buildTokenWithUid(
+        appId,
+        appCertificate,
+        channelName,
+        agoraUid,
+        RtcRole.PUBLISHER,
+        privilegeExpiredTs
+      );
+
+      if (!token || token.length < 100) {
+        throw new Error(`Invalid token generated: ${token ? 'too short' : 'null'}`);
+      }
+
+      console.log('✅ Token Generated Successfully:', {
+        tokenLength: token.length,
+        tokenPrefix: token.substring(0, 30) + '...',
+        uid: agoraUid
+      });
+
+    } catch (tokenGenError) {
+      console.error('❌ TOKEN GENERATION FAILED:', {
+        error: tokenGenError.message,
+        stack: tokenGenError.stack,
+        appIdConfigured: !!appId,
+        certificateConfigured: !!appCertificate,
+        certificateLength: appCertificate?.length
+      });
+      
+      // CRITICAL: Do NOT fall back to demo_token in production
+      return res.status(500).json({
+        success: false,
+        error: 'Agora token generation failed. Check App Certificate configuration.',
+        hint: '1. Verify App Certificate is ENABLED in Agora Console\n2. Ensure AGORA_APP_CERTIFICATE environment variable is correct\n3. Restart backend after updating environment',
+        code: 'TOKEN_GENERATION_FAILED',
+        details: {
+          appIdConfigured: !!appId,
+          certificateConfigured: !!appCertificate,
+          certificateLength: appCertificate?.length,
+          expectedLength: 32,
+          error: tokenGenError.message
+        }
+      });
+    }
+
+    // ========== CREATE SESSION IN MEMORY ==========
+    const memorySession = sessionManager.createSession(sessionData.meeting_id, {
+      id: sessionData.id,
+      meeting_id: sessionData.meeting_id,
+      class_id: sessionData.class_id,
+      teacher_id: sessionData.teacher_id,
+      status: 'active',
+      started_at: sessionData.started_at,
+      channel_name: sessionData.channel_name,
+      access_code: sessionData.access_code,
+      participants: [user_id],
+      agora_uids: { [user_id]: agoraUid },
+      teacher_joined: true,
+      teacher_agora_uid: agoraUid,
+      db_session_id: sessionData.id,
+      is_dynamic_id: sessionData.is_dynamic_id || false
+    });
+
+    console.log('💾 Session created in memory:', {
+      meetingId: memorySession.meeting_id,
+      teacherUid: agoraUid,
+      participants: memorySession.participants.length
+    });
+
+    // ========== RETURN RESPONSE ==========
+    const response = {
+      success: true,
+      meetingId: sessionData.meeting_id,
+      channel: sessionData.channel_name,
+      channelName: sessionData.channel_name,
+      accessCode: sessionData.access_code,
+      token: token,
+      appId: appId,
+      uid: agoraUid,
+      teacherId: user_id,
+      session: {
+        id: sessionData.id,
+        meeting_id: sessionData.meeting_id,
+        meetingId: sessionData.meeting_id,
+        class_id: sessionData.class_id,
+        teacher_id: sessionData.teacher_id,
+        status: 'active',
+        channel: sessionData.channel_name,
+        channel_name: sessionData.channel_name,
+        participants_count: 1,
+        teacher_joined: true,
+        teacher_uid: agoraUid,
+        is_dynamic_id: sessionData.is_dynamic_id || false
+      },
+      message: existingSession ? 'Rejoined existing session' : 'Session started successfully',
+      agoraConfig: {
+        appIdConfigured: true,
+        certificateConfigured: true,
+        tokenGenerated: true,
+        uidType: 'generated'
+      }
+    };
+
+    console.log('✅ TEACHER SESSION STARTED:', {
+      meetingId: sessionData.meeting_id,
+      channel: sessionData.channel_name,
+      tokenLength: token.length,
+      uid: agoraUid,
+      teacherId: user_id
+    });
+
+    res.json(response);
+
   } catch (error) {
-    console.error('❌ Error in /start-session:', error);
+    console.error('❌ CRITICAL ERROR in /start-session:', {
+      error: error.message,
+      stack: error.stack,
+      timestamp: new Date().toISOString()
+    });
     
     res.status(500).json({
       success: false,
-      error: error.message || 'Failed to start session',
-      hint: 'Database connection issue'
+      error: 'Failed to start video session: ' + error.message,
+      code: 'SESSION_START_FAILED',
+      hint: 'Check database connection and Agora configuration',
+      timestamp: new Date().toISOString()
     });
   }
 });
-
-// ==================== SMART JOIN SESSION ====================
+// ==================== JOIN SESSION (PRODUCTION READY) ====================
 router.post('/join-session', async (req, res) => {
   try {
     const { 
       meeting_id, 
       user_id, 
       user_type = 'student',
-      role = 'student' // Alternative parameter name
+      role = 'student'
     } = req.body;
 
-    console.log('🔗 SMART JOIN-SESSION REQUEST:', { 
+    console.log('🔗 PRODUCTION JOIN REQUEST:', { 
       meeting_id, 
       user_id, 
       user_type,
@@ -371,16 +511,18 @@ router.post('/join-session', async (req, res) => {
       timestamp: new Date().toISOString()
     });
 
+    // ========== VALIDATE INPUT ==========
     if (!meeting_id || !user_id) {
       return res.status(400).json({
         success: false,
         error: 'Meeting ID and User ID are required',
-        code: 'MISSING_PARAMS'
+        code: 'MISSING_PARAMS',
+        required: ['meeting_id', 'user_id']
       });
     }
 
     // Clean meeting_id
-    const cleanMeetingId = meeting_id.replace(/["']/g, '').trim();
+    const cleanMeetingId = meeting_id.toString().replace(/["']/g, '').trim();
     const effectiveUserType = user_type || role || 'student';
     const isTeacher = effectiveUserType === 'teacher';
     
@@ -391,75 +533,33 @@ router.post('/join-session', async (req, res) => {
       originalMeetingId: meeting_id
     });
 
-    // ========== SMART MEETING ID RESOLUTION ==========
-    let classId = null;
-    let actualChannelName = cleanMeetingId;
-    let sessionType = 'unknown';
+    // ========== VERIFY AGORA CONFIGURATION ==========
+    const appId = process.env.AGORA_APP_ID;
+    const appCertificate = process.env.AGORA_APP_CERTIFICATE;
 
-    // Pattern 1: Teacher-specific ID (class_{classId}_teacher_{teacherId})
-    const teacherPattern = /^class_([^_]+)_teacher_([^_]+)$/;
-    const teacherMatch = cleanMeetingId.match(teacherPattern);
-
-    // Pattern 2: Generic class ID (class_{classId})
-    const genericPattern = /^class_([^_]+)$/;
-    const genericMatch = cleanMeetingId.match(genericPattern);
-
-    // Pattern 3: Channel pattern (channel_class_{classId}_teacher_{teacherId})
-    const channelPattern = /^channel_class_([^_]+)(?:_teacher_([^_]+))?$/;
-    const channelMatch = cleanMeetingId.match(channelPattern);
-
-    if (teacherMatch) {
-      // Teacher-specific meeting ID: class_123_teacher_tchr789
-      classId = teacherMatch[1];
-      const teacherId = teacherMatch[2];
-      actualChannelName = `channel_${cleanMeetingId}`;
-      sessionType = 'teacher_specific';
-      console.log('👨‍🏫 TEACHER-SPECIFIC MEETING:', { 
-        classId, 
-        teacherId, 
-        channel: actualChannelName,
-        pattern: 'teacher_specific'
+    if (!appId || !appCertificate) {
+      console.error('❌ Agora configuration missing:', {
+        hasAppId: !!appId,
+        hasCertificate: !!appCertificate
       });
-    } else if (channelMatch) {
-      // Channel name: channel_class_123 or channel_class_123_teacher_tchr789
-      classId = channelMatch[1];
-      const teacherId = channelMatch[2];
-      actualChannelName = cleanMeetingId; // Already a channel name
-      sessionType = teacherId ? 'teacher_channel' : 'generic_channel';
-      console.log('🔗 CHANNEL NAME DETECTED:', { 
-        classId, 
-        teacherId,
-        channel: actualChannelName,
-        pattern: sessionType
+      
+      return res.status(500).json({
+        success: false,
+        error: 'Video service not configured',
+        code: 'AGORA_CONFIG_MISSING',
+        hint: 'Check AGORA_APP_ID and AGORA_APP_CERTIFICATE environment variables'
       });
-    } else if (genericMatch) {
-      // Generic class meeting ID: class_123
-      classId = genericMatch[1];
-      actualChannelName = `channel_class_${classId}`;
-      sessionType = 'generic_class';
-      console.log('🎓 GENERIC CLASS MEETING:', { 
-        classId, 
-        channel: actualChannelName,
-        pattern: 'generic_class'
-      });
-    } else {
-      // Unknown format, try to use as-is
-      console.log('⚠️ UNKNOWN MEETING ID FORMAT, using as-is:', cleanMeetingId);
-      actualChannelName = cleanMeetingId;
     }
 
-    // ========== FIND OR CREATE SESSION ==========
+    // ========== FIND SESSION ==========
     let session = sessionManager.getSession(cleanMeetingId);
     let sessionRestored = false;
     
     if (!session) {
       console.log('🔄 Session not in memory, checking database...');
       
-      // Try multiple ways to find the session
-      let dbSession = null;
-      
-      // Method 1: Exact meeting ID match
-      const { data: exactMatch } = await supabase
+      // Try to find session in database
+      const { data: dbSession } = await supabase
         .from('video_sessions')
         .select(`
           *,
@@ -476,36 +576,8 @@ router.post('/join-session', async (req, res) => {
         .limit(1)
         .single();
 
-      if (exactMatch) {
-        dbSession = exactMatch;
-        console.log('✅ Found exact meeting ID match');
-      } else if (classId) {
-        // Method 2: Find by class ID (for students)
-        const { data: classMatch } = await supabase
-          .from('video_sessions')
-          .select(`
-            *,
-            classes (
-              title,
-              teacher_id,
-              id
-            )
-          `)
-          .eq('class_id', classId)
-          .eq('status', 'active')
-          .is('ended_at', null)
-          .order('started_at', { ascending: false })
-          .limit(1)
-          .single();
-        
-        if (classMatch) {
-          dbSession = classMatch;
-          console.log('✅ Found class ID match:', classId);
-        }
-      }
-
       if (dbSession) {
-        // Restore session from database to memory
+        // Restore session from database
         session = sessionManager.createSession(dbSession.meeting_id, {
           id: dbSession.id,
           meeting_id: dbSession.meeting_id,
@@ -519,95 +591,116 @@ router.post('/join-session', async (req, res) => {
           db_session_id: dbSession.id,
           agora_uids: {},
           teacher_joined: false,
+          teacher_agora_uid: null,
           is_dynamic_id: dbSession.is_dynamic_id || false
         });
         sessionRestored = true;
-        console.log('🔄 Session restored from database');
+        console.log('🔄 Session restored from database:', dbSession.meeting_id);
       }
     }
 
-    // ========== VALIDATE SESSION ==========
+    // ========== VALIDATE SESSION EXISTS ==========
     if (!session) {
-      console.error('❌ No active session found for:', {
-        meetingId: cleanMeetingId,
-        classId,
-        sessionType,
-        isTeacher
-      });
-      
-      // If teacher is trying to join non-existent session, allow them to start one
-      if (isTeacher && classId) {
-        console.log('👨‍🏫 Teacher joining non-existent session, they should start one first');
-      }
+      console.error('❌ No active session found:', cleanMeetingId);
       
       return res.status(404).json({
         success: false,
-        error: 'No active session found. Teacher needs to start the session first.',
+        error: 'No active session found',
         code: 'SESSION_NOT_FOUND',
-        classId: classId,
-        isTeacher: isTeacher,
-        suggestedAction: isTeacher ? 'Call /start-session first' : 'Wait for teacher'
+        meetingId: cleanMeetingId,
+        isTeacher,
+        suggestedAction: isTeacher ? 'Call /start-session first' : 'Wait for teacher to start session'
       });
     }
 
-    // Teacher validation
+    // ========== TEACHER VALIDATION ==========
     if (isTeacher && session.teacher_id !== user_id) {
       console.error('❌ Teacher authorization failed:', {
         sessionTeacher: session.teacher_id,
         requestingTeacher: user_id
       });
+      
       return res.status(403).json({
         success: false,
-        error: 'Not authorized to join this session as teacher.',
-        code: 'TEACHER_AUTH_FAILED'
+        error: 'Not authorized to join as teacher',
+        code: 'TEACHER_AUTH_FAILED',
+        sessionTeacherId: session.teacher_id,
+        requestingTeacherId: user_id
       });
     }
 
-    // ========== TOKEN GENERATION ==========
-    const appId = process.env.AGORA_APP_ID;
-    const appCertificate = process.env.AGORA_APP_CERTIFICATE;
-
-    if (!appId || !appCertificate) {
-      return res.status(500).json({
-        success: false,
-        error: 'Video service not configured',
-        code: 'AGORA_CONFIG_MISSING'
-      });
-    }
-
-    // Generate unique Agora UID
-    let agoraUid = generateUniqueAgoraUid();
+    // ========== GENERATE OR REUSE AGORA UID ==========
+    let agoraUid;
     
-    // Ensure unique UID within this session
-    while (Object.values(session.agora_uids || {}).includes(agoraUid)) {
+    if (isTeacher && session.teacher_agora_uid) {
+      // Teacher rejoining - use existing UID
+      agoraUid = session.teacher_agora_uid;
+      console.log('👨‍🏫 Teacher rejoining with existing UID:', agoraUid);
+    } else {
+      // New participant or teacher first time
       agoraUid = generateUniqueAgoraUid();
+      
+      // Ensure UID is unique in session
+      while (Object.values(session.agora_uids || {}).includes(agoraUid)) {
+        agoraUid = generateUniqueAgoraUid();
+      }
+      
+      console.log('🎯 Generated new UID:', agoraUid);
     }
 
-    const expirationTime = 3600;
+    // ========== GENERATE AGORA TOKEN ==========
+    const expirationTime = 3600; // 1 hour
     const currentTime = Math.floor(Date.now() / 1000);
     const privilegeExpiredTs = currentTime + expirationTime;
 
-    // Use the CORRECT channel name
-    const finalChannelName = session.channel_name || actualChannelName;
+    const finalChannelName = session.channel_name;
     
-    console.log('🔗 Generating token for:', {
+    console.log('🔑 Generating token for:', {
       user_id,
       role: isTeacher ? 'teacher' : 'student',
       channel: finalChannelName,
       uid: agoraUid,
-      sessionType: sessionType
+      sessionId: session.meeting_id
     });
 
-    const token = RtcTokenBuilder.buildTokenWithUid(
-      appId,
-      appCertificate,
-      finalChannelName,
-      agoraUid,
-      RtcRole.PUBLISHER,
-      privilegeExpiredTs
-    );
+    let token;
+    try {
+      token = RtcTokenBuilder.buildTokenWithUid(
+        appId,
+        appCertificate,
+        finalChannelName,
+        agoraUid,
+        RtcRole.PUBLISHER,
+        privilegeExpiredTs
+      );
 
-    // Add participant to session
+      if (!token || token.length < 100) {
+        throw new Error(`Invalid token generated: ${token ? 'too short' : 'null'}`);
+      }
+
+      console.log('✅ Token generated:', {
+        tokenLength: token.length,
+        tokenPrefix: token.substring(0, 30) + '...',
+        expiresAt: new Date(privilegeExpiredTs * 1000).toISOString()
+      });
+
+    } catch (tokenError) {
+      console.error('❌ Token generation failed:', tokenError);
+      
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to generate video token',
+        code: 'TOKEN_GENERATION_FAILED',
+        hint: 'Check Agora App Certificate configuration',
+        details: {
+          error: tokenError.message,
+          channel: finalChannelName,
+          uid: agoraUid
+        }
+      });
+    }
+
+    // ========== UPDATE SESSION STATE ==========
     sessionManager.addParticipant(session.meeting_id, user_id, agoraUid, isTeacher);
 
     // Log participant in database
@@ -631,81 +724,74 @@ router.post('/join-session', async (req, res) => {
     }
 
     // ========== BUILD RESPONSE ==========
-   const response = {
-  success: true,
-  // Frontend expects camelCase
-  meetingId: session.meeting_id,
-  channel: finalChannelName, 
-  token: token,
-  appId: appId,
-  uid: agoraUid,
-  role: isTeacher ? 'teacher' : 'student',
-  
-  // Session object
-  session: {
-    id: session.id,
-    meeting_id: session.meeting_id,
-    meetingId: session.meeting_id,
-    class_id: session.class_id,
-    teacher_id: session.teacher_id,
-    status: session.status,
-    class_title: session.class_title,
-    channel: finalChannelName, 
-    channel_name: finalChannelName,
-    participants_count: sessionManager.getParticipantCount(session.meeting_id),
-    teacher_joined: session.teacher_joined,
-    is_dynamic_id: session.is_dynamic_id || false
-  },
-  
-  // Additional info
-  class_title: session.class_title,
-  
-  // Backward compatibility (snake_case)
-  meeting_id: session.meeting_id,
-  app_id: appId,
-  user_type: isTeacher ? 'teacher' : 'student',
-  is_teacher: isTeacher,
-  teacher_present: session.teacher_joined,
-  session_restored: sessionRestored,
-  session_type: sessionType,
-  class_id: classId,
-  channel_synchronized: true,
-  message: `Joined ${finalChannelName} as ${isTeacher ? 'teacher' : 'student'}`,
-  debug: {
-    originalMeetingId: meeting_id,
-    cleanMeetingId,
-    finalChannelName,
-    sessionType,
-    teacherId: session.teacher_id
-  }
-};
+    const response = {
+      success: true,
+      meetingId: session.meeting_id,
+      channel: finalChannelName,
+      token: token,
+      appId: appId,
+      uid: agoraUid,
+      role: isTeacher ? 'teacher' : 'student',
+      session: {
+        id: session.id,
+        meeting_id: session.meeting_id,
+        meetingId: session.meeting_id,
+        class_id: session.class_id,
+        teacher_id: session.teacher_id,
+        status: session.status,
+        class_title: session.class_title,
+        channel: finalChannelName,
+        channel_name: finalChannelName,
+        participants_count: sessionManager.getParticipantCount(session.meeting_id),
+        teacher_joined: session.teacher_joined || isTeacher,
+        teacher_present: session.teacher_joined,
+        is_dynamic_id: session.is_dynamic_id || false
+      },
+      class_title: session.class_title,
+      meeting_id: session.meeting_id,
+      app_id: appId,
+      user_type: isTeacher ? 'teacher' : 'student',
+      is_teacher: isTeacher,
+      teacher_present: session.teacher_joined,
+      session_restored: sessionRestored,
+      channel_synchronized: true,
+      message: `Joined ${finalChannelName} as ${isTeacher ? 'teacher' : 'student'}`,
+      agoraConfig: {
+        tokenGenerated: true,
+        tokenLength: token.length,
+        expiresIn: expirationTime,
+        uidAssigned: agoraUid
+      }
+    };
 
-    console.log('✅ JOIN SUCCESSFUL - SAME CHANNEL AS TEACHER:', {
+    console.log('✅ JOIN SUCCESSFUL:', {
       meetingId: session.meeting_id,
       channel: finalChannelName,
       user_id,
       role: response.role,
       teacher_present: session.teacher_joined,
       participants: sessionManager.getParticipantCount(session.meeting_id),
-      sessionType: sessionType
+      uid: agoraUid,
+      tokenValid: token.length > 100
     });
 
     res.json(response);
 
   } catch (error) {
-    console.error('❌ Error in join-session:', {
+    console.error('❌ CRITICAL ERROR in /join-session:', {
       error: error.message,
       stack: error.stack,
       timestamp: new Date().toISOString()
     });
+    
     res.status(500).json({
       success: false,
       error: 'Internal server error: ' + error.message,
-      code: 'INTERNAL_ERROR'
+      code: 'INTERNAL_ERROR',
+      timestamp: new Date().toISOString()
     });
   }
 });
-
 // ==================== END SESSION ====================
 router.post('/end-session', async (req, res) => {
   try {
