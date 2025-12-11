@@ -272,17 +272,17 @@ router.post('/start-session', async (req, res) => {
       'demo_token';
 
     res.json({
-      success: true,
-      meetingId: sessionData.meeting_id,
-      channelName: sessionData.channel_name,
-      accessCode: sessionData.access_code,
-      token: token,
-      appId: appId,
-      uid: uid,
-      teacherId: user_id,
-      message: existingSession ? 'Rejoined existing session' : 'Session created successfully'
-    });
-
+  success: true,
+  meetingId: sessionData.meeting_id,
+  channel: sessionData.channel_name, 
+  channelName: sessionData.channel_name, 
+  accessCode: sessionData.access_code,
+  token: token,
+  appId: appId,
+  uid: uid,
+  teacherId: user_id,
+  message: existingSession ? 'Rejoined existing session' : 'Session created successfully'
+});
   } catch (error) {
     console.error('❌ Error in /start-session:', error);
     
@@ -572,53 +572,54 @@ router.post('/join-session', async (req, res) => {
     }
 
     // ========== BUILD RESPONSE ==========
-    const response = {
-      success: true,
-      // Frontend expects camelCase
-      meetingId: session.meeting_id,
-      channel: finalChannelName,
-      token: token,
-      appId: appId,
-      uid: agoraUid,
-      role: isTeacher ? 'teacher' : 'student',
-      
-      // Session object
-      session: {
-        id: session.id,
-        meeting_id: session.meeting_id,
-        meetingId: session.meeting_id,
-        class_id: session.class_id,
-        teacher_id: session.teacher_id,
-        status: session.status,
-        class_title: session.class_title,
-        channel_name: finalChannelName,
-        participants_count: sessionManager.getParticipantCount(session.meeting_id),
-        teacher_joined: session.teacher_joined,
-        is_dynamic_id: session.is_dynamic_id || false
-      },
-      
-      // Additional info
-      class_title: session.class_title,
-      
-      // Backward compatibility (snake_case)
-      meeting_id: session.meeting_id,
-      app_id: appId,
-      user_type: isTeacher ? 'teacher' : 'student',
-      is_teacher: isTeacher,
-      teacher_present: session.teacher_joined,
-      session_restored: sessionRestored,
-      session_type: sessionType,
-      class_id: classId,
-      channel_synchronized: true,
-      message: `Joined ${finalChannelName} as ${isTeacher ? 'teacher' : 'student'}`,
-      debug: {
-        originalMeetingId: meeting_id,
-        cleanMeetingId,
-        finalChannelName,
-        sessionType,
-        teacherId: session.teacher_id
-      }
-    };
+   const response = {
+  success: true,
+  // Frontend expects camelCase
+  meetingId: session.meeting_id,
+  channel: finalChannelName, 
+  token: token,
+  appId: appId,
+  uid: agoraUid,
+  role: isTeacher ? 'teacher' : 'student',
+  
+  // Session object
+  session: {
+    id: session.id,
+    meeting_id: session.meeting_id,
+    meetingId: session.meeting_id,
+    class_id: session.class_id,
+    teacher_id: session.teacher_id,
+    status: session.status,
+    class_title: session.class_title,
+    channel: finalChannelName, 
+    channel_name: finalChannelName,
+    participants_count: sessionManager.getParticipantCount(session.meeting_id),
+    teacher_joined: session.teacher_joined,
+    is_dynamic_id: session.is_dynamic_id || false
+  },
+  
+  // Additional info
+  class_title: session.class_title,
+  
+  // Backward compatibility (snake_case)
+  meeting_id: session.meeting_id,
+  app_id: appId,
+  user_type: isTeacher ? 'teacher' : 'student',
+  is_teacher: isTeacher,
+  teacher_present: session.teacher_joined,
+  session_restored: sessionRestored,
+  session_type: sessionType,
+  class_id: classId,
+  channel_synchronized: true,
+  message: `Joined ${finalChannelName} as ${isTeacher ? 'teacher' : 'student'}`,
+  debug: {
+    originalMeetingId: meeting_id,
+    cleanMeetingId,
+    finalChannelName,
+    sessionType,
+    teacherId: session.teacher_id
+  }
+};
 
     console.log('✅ JOIN SUCCESSFUL - SAME CHANNEL AS TEACHER:', {
       meetingId: session.meeting_id,
@@ -903,21 +904,21 @@ router.get('/session-info/:meetingId', async (req, res) => {
       'demo_token';
 
     res.json({
-      success: true,
-      meetingId: session.meeting_id,
-      channelName: session.channel_name,
-      accessCode: session.access_code,
-      token: token,
-      appId: appId,
-      uid: uid,
-      classId: session.class_id,
-      className: session.classes?.name,
-      teacherId: session.teacher_id,
-      teacherName: session.profiles?.name,
-      expiresAt: session.expires_at,
-      isActive: session.status === 'active'
-    });
-
+  success: true,
+  meetingId: session.meeting_id,
+  channel: session.channel_name, 
+  channelName: session.channel_name,
+  accessCode: session.access_code,
+  token: token,
+  appId: appId,
+  uid: uid,
+  classId: session.class_id,
+  className: session.classes?.name,
+  teacherId: session.teacher_id,
+  teacherName: session.profiles?.name,
+  expiresAt: session.expires_at,
+  isActive: session.status === 'active'
+});
   } catch (error) {
     console.error('❌ Error in /session-info:', error);
     res.status(500).json({
@@ -954,14 +955,14 @@ router.get('/find-session/:classId', async (req, res) => {
     }
     
     res.json({
-      success: true,
-      meetingId: session.meeting_id,
-      accessCode: session.access_code,
-      channelName: session.channel_name,
-      teacherId: session.teacher_id,
-      expiresAt: session.expires_at
-    });
-
+  success: true,
+  meetingId: session.meeting_id,
+  accessCode: session.access_code,
+  channel: session.channel_name, 
+  channelName: session.channel_name,
+  teacherId: session.teacher_id,
+  expiresAt: session.expires_at
+});
   } catch (error) {
     console.error('❌ Error in /find-session:', error);
     res.status(500).json({
