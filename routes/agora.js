@@ -167,6 +167,53 @@ function generateUniqueAgoraUid() {
   return uid;
 }
 
+
+
+router.post('/generate-fresh-token', async (req, res) => {
+  try {
+    const { channelName, uid, role = 'publisher' } = req.body;
+    
+    const appId = process.env.AGORA_APP_ID;
+    const appCertificate = process.env.AGORA_APP_CERTIFICATE;
+    
+    if (!appId || !appCertificate) {
+      return res.status(500).json({
+        success: false,
+        error: 'Agora credentials not configured'
+      });
+    }
+    
+    // Generate token with fresh expiration
+    const expirationTime = 3600; // 1 hour
+    const currentTime = Math.floor(Date.now() / 1000);
+    const privilegeExpiredTs = currentTime + expirationTime;
+    
+    const token = RtcTokenBuilder.buildTokenWithUid(
+      appId,
+      appCertificate,
+      channelName,
+      uid,
+      role === 'publisher' ? RtcRole.PUBLISHER : RtcRole.SUBSCRIBER,
+      privilegeExpiredTs
+    );
+    
+    res.json({
+      success: true,
+      token,
+      appId,
+      channelName,
+      uid,
+      expiresAt: privilegeExpiredTs * 1000
+    });
+    
+  } catch (error) {
+    console.error('❌ Token generation error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to generate token'
+    });
+  }
+});
 // ==================== START SESSION (TEACHER) - DYNAMIC ====================
 router.post('/start-session', async (req, res) => {
   try {
