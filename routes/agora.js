@@ -170,216 +170,129 @@ function generateUniqueAgoraUid() {
 // ==================== START SESSION (TEACHER) - DYNAMIC ====================
 router.post('/start-session', async (req, res) => {
   try {
-    const { 
-      class_id, 
-      user_id,
-      requested_meeting_id,
-      requested_channel_name 
-    } = req.body;
+    const { class_id, user_id, requested_meeting_id, requested_channel_name } = req.body;
     
-    console.log('🎬 TEACHER STARTING SESSION:', { 
-      class_id, 
+    console.log('TEACHER STARTING SESSION:', {
+      class_id,
       user_id,
       requested_meeting_id,
       requested_channel_name,
       hasRequestedId: !!requested_meeting_id
     });
 
-    if (!class_id || !user_id) {
-      return res.status(400).json({
-        success: false,
-        error: 'Class ID and User ID are required'
-      });
-    }
-
-    // Verify class exists and teacher is authorized
-    const { data: classData, error: classError } = await supabase
-      .from('classes')
-      .select('id, title, teacher_id, status')
-      .eq('id', class_id)
-      .single();
-
-    if (classError || !classData) {
-      return res.status(404).json({
-        success: false,
-        error: 'Class not found'
-      });
-    }
-
-    if (classData.teacher_id !== user_id) {
-      return res.status(403).json({
-        success: false,
-        error: 'Not authorized to start this class session'
-      });
-    }
-
-    // ========== DYNAMIC MEETING & CHANNEL GENERATION ==========
-    // Use requested IDs or generate dynamic teacher-specific IDs
-    let meetingId;
-    let channelName;
+    // Generate dynamic IDs
+    const timestamp = Date.now();
+    const meetingId = requested_meeting_id || `class_${class_id.replace(/-/g, '_')}_teacher_${user_id.substring(0, 8)}`;
+    const channelName = requested_channel_name || `channel_class_${class_id.replace(/-/g, '_')}_teacher_${user_id.substring(0, 8)}`;
     
-    if (requested_meeting_id && requested_channel_name) {
-      // Use frontend-provided IDs
-      meetingId = requested_meeting_id;
-      channelName = requested_channel_name;
-      console.log('🎯 USING FRONTEND-PROVIDED IDs:', { meetingId, channelName });
-    } else {
-      // Generate dynamic teacher-specific IDs
-      meetingId = generateDynamicMeetingId(class_id, user_id);
-      channelName = generateMatchingChannelName(meetingId);
-      console.log('🔄 GENERATED DYNAMIC IDs:', { meetingId, channelName, teacherId: user_id });
-    }
-
-    // Check if session already exists for this teacher
-    let existingSession = sessionManager.getSession(meetingId);
-    
-    if (existingSession && existingSession.status === 'active') {
-      // Session already exists, return existing session info
-      console.log('📌 Reusing existing session:', meetingId);
-      
-      // Generate token for teacher to join existing session
-      const appId = process.env.AGORA_APP_ID;
-      const appCertificate = process.env.AGORA_APP_CERTIFICATE;
-      const teacherUid = generateUniqueAgoraUid();
-      
-      const expirationTime = 3600;
-      const currentTime = Math.floor(Date.now() / 1000);
-      const privilegeExpiredTs = currentTime + expirationTime;
-
-      const token = RtcTokenBuilder.buildTokenWithUid(
-        appId,
-        appCertificate,
-        channelName,
-        teacherUid,
-        RtcRole.PUBLISHER,
-        privilegeExpiredTs
-      );
-
-      // Add teacher to participants
-      sessionManager.addParticipant(meetingId, user_id, teacherUid, true);
-      
-      return res.json({
-        success: true,
-        meeting_id: meetingId,
-        channel: channelName,
-        token: token,
-        app_id: appId,
-        uid: teacherUid,
-        session: {
-          ...existingSession,
-          meeting_id: meetingId,
-          channel_name: channelName
-        },
-        class_title: classData.title,
-        role: 'teacher',
-        isExistingSession: true,
-        isDynamicId: !!requested_meeting_id
-      });
-    }
-
-    // Create NEW video session in database
-    const { data: dbSession, error: dbError } = await supabase
-      .from('video_sessions')
-      .insert([{
-        meeting_id: meetingId,
-        class_id: class_id,
-        teacher_id: user_id,
-        channel_name: channelName,
-        status: 'active',
-        started_at: new Date().toISOString(),
-        agenda: `Live class: ${classData.title}`,
-        is_dynamic_id: !!requested_meeting_id
-      }])
-      .select()
-      .single();
-
-    if (dbError) {
-      console.error('❌ Database insertion failed:', dbError);
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to create session in database'
-      });
-    }
-
-    // Update class status
-    await supabase
-      .from('classes')
-      .update({ status: 'active' })
-      .eq('id', class_id);
-
-    // ========== GENERATE TEACHER TOKEN ==========
-    const appId = process.env.AGORA_APP_ID;
-    const appCertificate = process.env.AGORA_APP_CERTIFICATE;
-
-    if (!appId || !appCertificate) {
-      return res.status(500).json({
-        success: false,
-        error: 'Video service not configured'
-      });
-    }
-
-    const teacherUid = generateUniqueAgoraUid();
-    
-    const expirationTime = 3600;
-    const currentTime = Math.floor(Date.now() / 1000);
-    const privilegeExpiredTs = currentTime + expirationTime;
-
-    const token = RtcTokenBuilder.buildTokenWithUid(
-      appId,
-      appCertificate,
-      channelName,
-      teacherUid,
-      RtcRole.PUBLISHER,
-      privilegeExpiredTs
-    );
-
-    // Create session in memory
-    const sessionData = {
-      id: meetingId,
-      meeting_id: meetingId,
-      class_id,
-      teacher_id: user_id,
-      status: 'active',
-      started_at: new Date().toISOString(),
-      channel_name: channelName,
-      class_title: classData.title,
-      participants: [user_id],
-      db_session_id: dbSession?.id,
-      agora_uids: {},
-      teacher_joined: true,
-      teacher_agora_uid: teacherUid,
-      is_dynamic_id: !!requested_meeting_id
-    };
-
-    sessionManager.createSession(meetingId, sessionData);
-    sessionManager.addParticipant(meetingId, user_id, teacherUid, true);
-
-    console.log('✅ TEACHER SESSION CREATED WITH DYNAMIC ID:', {
+    console.log('🔄 GENERATED DYNAMIC IDs:', {
       meetingId,
       channelName,
-      teacherUid,
-      tokenLength: token?.length,
-      isDynamic: !!requested_meeting_id
+      teacherId: user_id
     });
+
+    // Generate access code (6 characters)
+    const generateAccessCode = () => {
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      let code = '';
+      for (let i = 0; i < 6; i++) {
+        code += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      return code;
+    };
+
+    const accessCode = generateAccessCode();
+
+    // 1. Check for existing active session
+    const existingSession = await db.query(
+      'SELECT * FROM video_sessions WHERE class_id = $1 AND status = $2',
+      [class_id, 'active']
+    );
+
+    let sessionData;
+
+    if (existingSession.rows.length > 0) {
+      // Update existing session
+      await db.query(
+        `UPDATE video_sessions 
+         SET last_activity = CURRENT_TIMESTAMP,
+             expires_at = CURRENT_TIMESTAMP + INTERVAL '24 hours'
+         WHERE id = $1`,
+        [existingSession.rows[0].id]
+      );
+      
+      sessionData = existingSession.rows[0];
+      console.log('✅ Reusing existing session:', sessionData.meeting_id);
+    } else {
+      // Create new session
+      const result = await db.query(
+        `INSERT INTO video_sessions (
+          class_id, 
+          teacher_id, 
+          meeting_id, 
+          channel_name,
+          access_code,
+          status, 
+          created_at, 
+          expires_at,
+          is_dynamic_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '24 hours', $7)
+        RETURNING *`,
+        [
+          class_id,
+          user_id,
+          meetingId,
+          channelName,
+          accessCode,
+          'active',
+          true
+        ]
+      );
+
+      if (!result.rows[0]) {
+        throw new Error('Failed to create session in database');
+      }
+
+      sessionData = result.rows[0];
+      console.log('✅ Created new session:', sessionData.meeting_id);
+    }
+
+    // Generate Agora token (if using Agora)
+    const appId = process.env.AGORA_APP_ID;
+    const appCertificate = process.env.AGORA_APP_CERTIFICATE;
+    const uid = 0; // Teacher UID
+    const role = RtcRole.PUBLISHER;
+    const expireTime = 3600; // 1 hour
+
+    const token = generateToken ? 
+      RtcTokenBuilder.buildTokenWithUid(appId, appCertificate, channelName, uid, role, expireTime) : 
+      'demo_token';
 
     res.json({
       success: true,
-      meeting_id: meetingId,
-      channel: channelName,
+      meetingId: sessionData.meeting_id,
+      channelName: sessionData.channel_name,
+      accessCode: sessionData.access_code,
       token: token,
-      app_id: appId,
-      uid: teacherUid,
-      session: sessionData,
-      class_title: classData.title,
-      role: 'teacher',
-      isDynamicId: !!requested_meeting_id
+      appId: appId,
+      uid: uid,
+      teacherId: user_id,
+      message: existingSession.rows.length > 0 ? 'Rejoined existing session' : 'Session created successfully'
     });
 
   } catch (error) {
-    console.error('❌ Error starting video session:', error);
+    console.error('❌ Error in /start-session:', error);
+    
+    // More detailed error logging
+    if (error.code === 'PGRST204') {
+      console.error('⚠️ Database schema issue detected. Run the SQL migration above.');
+    }
+    
     res.status(500).json({
       success: false,
-      error: 'Internal server error: ' + error.message
+      error: error.message || 'Failed to start session',
+      code: error.code,
+      hint: error.code === 'PGRST204' ? 'Database schema needs update. Check video_sessions table columns.' : null
     });
   }
 });
@@ -950,157 +863,117 @@ router.get('/session-status/:meetingId', async (req, res) => {
 router.get('/session-info/:meetingId', async (req, res) => {
   try {
     const { meetingId } = req.params;
-    const session = sessionManager.getSession(meetingId);
+    
+    console.log('📡 Fetching session info for:', meetingId);
 
-    if (!session) {
-      // Check database
-      const { data: dbSession } = await supabase
-        .from('video_sessions')
-        .select(`
-          *,
-          classes (
-            title,
-            teacher_id
-          )
-        `)
-        .eq('meeting_id', meetingId)
-        .single();
+    // Query the database
+    const result = await db.query(
+      `SELECT 
+        vs.*,
+        c.name as class_name,
+        u.name as teacher_name
+       FROM video_sessions vs
+       LEFT JOIN classes c ON vs.class_id = c.id
+       LEFT JOIN users u ON vs.teacher_id = u.id
+       WHERE vs.meeting_id = $1 
+         AND vs.status = 'active'
+         AND vs.expires_at > CURRENT_TIMESTAMP`,
+      [meetingId]
+    );
 
-      if (!dbSession) {
-        return res.status(404).json({
-          success: false,
-          error: 'Session not found'
-        });
-      }
-
-      return res.json({
-        success: true,
-        session: {
-          meeting_id: dbSession.meeting_id,
-          class_id: dbSession.class_id,
-          teacher_id: dbSession.teacher_id,
-          status: dbSession.status,
-          channel_name: dbSession.channel_name,
-          started_at: dbSession.started_at,
-          class_title: dbSession.classes?.title
-        }
+    if (result.rows.length === 0) {
+      console.log('❌ Session not found or expired:', meetingId);
+      return res.status(404).json({
+        success: false,
+        error: 'Session not found or has expired',
+        meetingId
       });
     }
 
+    const session = result.rows[0];
+    
+    // Generate student token
+    const appId = process.env.AGORA_APP_ID;
+    const appCertificate = process.env.AGORA_APP_CERTIFICATE;
+    const uid = Math.floor(Math.random() * 100000); // Random student UID
+    const role = RtcRole.SUBSCRIBER;
+    const expireTime = 3600;
+
+    const token = generateToken ? 
+      RtcTokenBuilder.buildTokenWithUid(appId, appCertificate, session.channel_name, uid, role, expireTime) : 
+      'demo_token';
+
     res.json({
       success: true,
-      session: {
-        meeting_id: meetingId,
-        class_id: session.class_id,
-        teacher_id: session.teacher_id,
-        status: session.status,
-        channel_name: session.channel_name,
-        started_at: session.started_at,
-        class_title: session.class_title,
-        participants: session.participants || [],
-        teacher_joined: session.teacher_joined
-      }
+      meetingId: session.meeting_id,
+      channelName: session.channel_name,
+      accessCode: session.access_code,
+      token: token,
+      appId: appId,
+      uid: uid,
+      classId: session.class_id,
+      className: session.class_name,
+      teacherId: session.teacher_id,
+      teacherName: session.teacher_name,
+      expiresAt: session.expires_at,
+      isActive: session.status === 'active'
     });
 
   } catch (error) {
-    console.error('❌ Error getting session info:', error);
+    console.error('❌ Error in /session-info:', error);
     res.status(500).json({
       success: false,
-      error: 'Internal server error'
+      error: 'Failed to fetch session information',
+      meetingId: req.params.meetingId
     });
   }
 });
 
-router.get('/session-by-class/:classId', async (req, res) => {
+
+router.get('/find-session/:classId', async (req, res) => {
   try {
     const { classId } = req.params;
     
-    // Check memory sessions
-    const memorySessions = sessionManager.getActiveSessions();
-    const memorySession = memorySessions.find(s => s.class_id === classId);
+    console.log('🔍 Finding active session for class:', classId);
+
+    const result = await db.query(
+      `SELECT * FROM video_sessions 
+       WHERE class_id = $1 
+         AND status = 'active'
+         AND expires_at > CURRENT_TIMESTAMP
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [classId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({
+        success: false,
+        error: 'No active session found for this class',
+        hint: 'Teacher needs to start the session first'
+      });
+    }
+
+    const session = result.rows[0];
     
-    if (memorySession) {
-      return res.json({
-        success: true,
-        session: {
-          meeting_id: memorySession.meeting_id,
-          class_id: memorySession.class_id,
-          teacher_id: memorySession.teacher_id,
-          status: memorySession.status,
-          channel_name: memorySession.channel_name,
-          started_at: memorySession.started_at,
-          class_title: memorySession.class_title,
-          participants: memorySession.participants || []
-        },
-        exists: true,
-        isActive: true
-      });
-    }
-
-    // Check database
-    const { data: dbSession } = await supabase
-      .from('video_sessions')
-      .select(`
-        *,
-        classes (
-          title,
-          teacher_id
-        )
-      `)
-      .eq('class_id', classId)
-      .eq('status', 'active')
-      .is('ended_at', null)
-      .order('started_at', { ascending: false })
-      .limit(1)
-      .single();
-
-    if (!dbSession) {
-      return res.json({
-        success: true,
-        exists: false,
-        isActive: false,
-        error: 'No active session found for this class'
-      });
-    }
-
-    // Restore to memory
-    sessionManager.createSession(dbSession.meeting_id, {
-      id: dbSession.id,
-      class_id: dbSession.class_id,
-      teacher_id: dbSession.teacher_id,
-      status: 'active',
-      started_at: dbSession.started_at,
-      channel_name: dbSession.channel_name,
-      class_title: dbSession.classes?.title,
-      participants: [dbSession.teacher_id],
-      db_session_id: dbSession.id
-    });
-
     res.json({
       success: true,
-      session: {
-        meeting_id: dbSession.meeting_id,
-        class_id: dbSession.class_id,
-        teacher_id: dbSession.teacher_id,
-        status: dbSession.status,
-        channel_name: dbSession.channel_name,
-        started_at: dbSession.started_at,
-        class_title: dbSession.classes?.title,
-        participants: [dbSession.teacher_id]
-      },
-      exists: true,
-      isActive: true,
-      restored: true
+      meetingId: session.meeting_id,
+      accessCode: session.access_code,
+      channelName: session.channel_name,
+      teacherId: session.teacher_id,
+      expiresAt: session.expires_at
     });
 
   } catch (error) {
-    console.error('❌ Error finding session by class:', error);
+    console.error('❌ Error in /find-session:', error);
     res.status(500).json({
       success: false,
-      error: 'Internal server error'
+      error: 'Failed to find session'
     });
   }
 });
+
 
 // ==================== VALIDATE STUDENT JOIN (NO VALIDATION) ====================
 router.post('/validate-student-join', async (req, res) => {
