@@ -204,56 +204,59 @@ router.post('/start-session', async (req, res) => {
     const accessCode = generateAccessCode();
 
     // 1. Check for existing active session
-    const existingSession = await db.query(
-      'SELECT * FROM video_sessions WHERE class_id = $1 AND status = $2',
-      [class_id, 'active']
-    );
+    const { data: existingSession, error: findError } = await supabase
+      .from('video_sessions')
+      .select('*')
+      .eq('class_id', class_id)
+      .eq('status', 'active')
+      .maybeSingle();
 
     let sessionData;
 
-    if (existingSession.rows.length > 0) {
+    if (existingSession) {
       // Update existing session
-      await db.query(
-        `UPDATE video_sessions 
-         SET last_activity = CURRENT_TIMESTAMP,
-             expires_at = CURRENT_TIMESTAMP + INTERVAL '24 hours'
-         WHERE id = $1`,
-        [existingSession.rows[0].id]
-      );
+      const { data: updatedSession, error: updateError } = await supabase
+        .from('video_sessions')
+        .update({
+          last_activity: new Date().toISOString(),
+          expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+        })
+        .eq('id', existingSession.id)
+        .select()
+        .single();
       
-      sessionData = existingSession.rows[0];
+      if (updateError) throw updateError;
+      
+      sessionData = updatedSession;
       console.log('✅ Reusing existing session:', sessionData.meeting_id);
     } else {
       // Create new session
-      const result = await db.query(
-        `INSERT INTO video_sessions (
-          class_id, 
-          teacher_id, 
-          meeting_id, 
-          channel_name,
-          access_code,
-          status, 
-          created_at, 
-          expires_at,
-          is_dynamic_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '24 hours', $7)
-        RETURNING *`,
-        [
-          class_id,
-          user_id,
-          meetingId,
-          channelName,
-          accessCode,
-          'active',
-          true
-        ]
-      );
+      const { data: newSession, error: createError } = await supabase
+        .from('video_sessions')
+        .insert({
+          class_id: class_id,
+          teacher_id: user_id,
+          meeting_id: meetingId,
+          channel_name: channelName,
+          access_code: accessCode,
+          status: 'active',
+          started_at: new Date().toISOString(),
+          expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+          is_dynamic_id: true
+        })
+        .select()
+        .single();
 
-      if (!result.rows[0]) {
+      if (createError) {
+        console.error('❌ Database error:', createError);
+        throw new Error('Failed to create session in database: ' + createError.message);
+      }
+
+      if (!newSession) {
         throw new Error('Failed to create session in database');
       }
 
-      sessionData = result.rows[0];
+      sessionData = newSession;
       console.log('✅ Created new session:', sessionData.meeting_id);
     }
 
@@ -264,7 +267,7 @@ router.post('/start-session', async (req, res) => {
     const role = RtcRole.PUBLISHER;
     const expireTime = 3600; // 1 hour
 
-    const token = generateToken ? 
+    const token = appId && appCertificate ? 
       RtcTokenBuilder.buildTokenWithUid(appId, appCertificate, channelName, uid, role, expireTime) : 
       'demo_token';
 
@@ -277,25 +280,20 @@ router.post('/start-session', async (req, res) => {
       appId: appId,
       uid: uid,
       teacherId: user_id,
-      message: existingSession.rows.length > 0 ? 'Rejoined existing session' : 'Session created successfully'
+      message: existingSession ? 'Rejoined existing session' : 'Session created successfully'
     });
 
   } catch (error) {
     console.error('❌ Error in /start-session:', error);
     
-    // More detailed error logging
-    if (error.code === 'PGRST204') {
-      console.error('⚠️ Database schema issue detected. Run the SQL migration above.');
-    }
-    
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to start session',
-      code: error.code,
-      hint: error.code === 'PGRST204' ? 'Database schema needs update. Check video_sessions table columns.' : null
+      hint: 'Database connection issue'
     });
   }
 });
+
 // ==================== SMART JOIN SESSION ====================
 router.post('/join-session', async (req, res) => {
   try {
@@ -647,6 +645,7 @@ router.post('/join-session', async (req, res) => {
     });
   }
 });
+
 // ==================== END SESSION ====================
 router.post('/end-session', async (req, res) => {
   try {
@@ -866,22 +865,24 @@ router.get('/session-info/:meetingId', async (req, res) => {
     
     console.log('📡 Fetching session info for:', meetingId);
 
-    // Query the database
-    const result = await db.query(
-      `SELECT 
-        vs.*,
-        c.name as class_name,
-        u.name as teacher_name
-       FROM video_sessions vs
-       LEFT JOIN classes c ON vs.class_id = c.id
-       LEFT JOIN users u ON vs.teacher_id = u.id
-       WHERE vs.meeting_id = $1 
-         AND vs.status = 'active'
-         AND vs.expires_at > CURRENT_TIMESTAMP`,
-      [meetingId]
-    );
+    // Query the database using supabase
+    const { data: session, error: sessionError } = await supabase
+      .from('video_sessions')
+      .select(`
+        *,
+        classes!video_sessions_class_id_fkey (
+          name
+        ),
+        profiles!video_sessions_teacher_id_fkey (
+          name
+        )
+      `)
+      .eq('meeting_id', meetingId)
+      .eq('status', 'active')
+      .gt('expires_at', new Date().toISOString())
+      .maybeSingle();
 
-    if (result.rows.length === 0) {
+    if (!session) {
       console.log('❌ Session not found or expired:', meetingId);
       return res.status(404).json({
         success: false,
@@ -889,8 +890,6 @@ router.get('/session-info/:meetingId', async (req, res) => {
         meetingId
       });
     }
-
-    const session = result.rows[0];
     
     // Generate student token
     const appId = process.env.AGORA_APP_ID;
@@ -899,7 +898,7 @@ router.get('/session-info/:meetingId', async (req, res) => {
     const role = RtcRole.SUBSCRIBER;
     const expireTime = 3600;
 
-    const token = generateToken ? 
+    const token = appId && appCertificate ? 
       RtcTokenBuilder.buildTokenWithUid(appId, appCertificate, session.channel_name, uid, role, expireTime) : 
       'demo_token';
 
@@ -912,9 +911,9 @@ router.get('/session-info/:meetingId', async (req, res) => {
       appId: appId,
       uid: uid,
       classId: session.class_id,
-      className: session.class_name,
+      className: session.classes?.name,
       teacherId: session.teacher_id,
-      teacherName: session.teacher_name,
+      teacherName: session.profiles?.name,
       expiresAt: session.expires_at,
       isActive: session.status === 'active'
     });
@@ -929,32 +928,30 @@ router.get('/session-info/:meetingId', async (req, res) => {
   }
 });
 
-
 router.get('/find-session/:classId', async (req, res) => {
   try {
     const { classId } = req.params;
     
     console.log('🔍 Finding active session for class:', classId);
 
-    const result = await db.query(
-      `SELECT * FROM video_sessions 
-       WHERE class_id = $1 
-         AND status = 'active'
-         AND expires_at > CURRENT_TIMESTAMP
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      [classId]
-    );
+    // USING SUPABASE
+    const { data: session, error } = await supabase
+      .from('video_sessions')
+      .select('*')
+      .eq('class_id', classId)
+      .eq('status', 'active')
+      .gt('expires_at', new Date().toISOString())
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
 
-    if (result.rows.length === 0) {
+    if (!session) {
       return res.json({
         success: false,
         error: 'No active session found for this class',
         hint: 'Teacher needs to start the session first'
       });
     }
-
-    const session = result.rows[0];
     
     res.json({
       success: true,
@@ -973,7 +970,6 @@ router.get('/find-session/:classId', async (req, res) => {
     });
   }
 });
-
 
 // ==================== VALIDATE STUDENT JOIN (NO VALIDATION) ====================
 router.post('/validate-student-join', async (req, res) => {
@@ -1040,6 +1036,7 @@ router.post('/validate-student-join', async (req, res) => {
     });
   }
 });
+
 // ==================== PARTICIPANTS MANAGEMENT ====================
 router.post('/session-participants', async (req, res) => {
   try {
@@ -1301,9 +1298,6 @@ router.post('/send-message', async (req, res) => {
       }
       
       actualSessionId = videoSession.id;
-      
-      // REMOVED ENROLLMENT CHECK - ANYONE CAN SEND MESSAGES
-      // No enrollment validation needed
     }
     
     // Insert message into database
@@ -1854,4 +1848,5 @@ router.post('/find-class-sessions', async (req, res) => {
     });
   }
 });
+
 export default router;
