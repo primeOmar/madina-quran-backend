@@ -183,8 +183,18 @@ router.post('/start-session', async (req, res) => {
     // Generate dynamic IDs
     const timestamp = Date.now();
     const meetingId = requested_meeting_id || `class_${class_id.replace(/-/g, '_')}_teacher_${user_id.substring(0, 8)}`;
-    const channelName = requested_channel_name || `channel_class_${class_id.replace(/-/g, '_')}_teacher_${user_id.substring(0, 8)}`;
-    
+    const channelName = requested_channel_name || generateShortChannelName(class_id, user_id);
+
+// Add this helper function:
+function generateShortChannelName(classId, userId) {
+  // Create a hash of classId + userId to make it shorter
+  const shortClassId = classId.substring(0, 8);
+  const shortUserId = userId.substring(0, 8);
+  const timestamp = Date.now().toString(36); 
+  
+  // Max 64 chars: "ch_" + shortClassId + "_" + shortUserId + "_" + timestamp
+  return `ch_${shortClassId}_${shortUserId}_${timestamp}`.substring(0, 64);
+}
     console.log('🔄 GENERATED DYNAMIC IDs:', {
       meetingId,
       channelName,
