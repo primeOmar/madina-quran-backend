@@ -169,6 +169,7 @@ function generateUniqueAgoraUid() {
 
 
 
+// ==================== GENERATE FRESH TOKEN ====================
 router.post('/generate-fresh-token', async (req, res) => {
   try {
     const { channelName, uid, role = 'publisher' } = req.body;
@@ -214,6 +215,7 @@ router.post('/generate-fresh-token', async (req, res) => {
     });
   }
 });
+
 // ==================== START SESSION (TEACHER) - DYNAMIC ====================
 router.post('/start-session', async (req, res) => {
   try {
