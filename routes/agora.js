@@ -1147,6 +1147,84 @@ router.get('/session-info/:meetingId', async (req, res) => {
   }
 });
 
+router.get('/session-by-class/:classId', async (req, res) => {
+  try {
+    const { classId } = req.params;
+    
+    console.log('🔍 Finding session for class:', classId);
+
+    // Find active session for this class
+    const { data: session, error } = await supabase
+      .from('video_sessions')
+      .select(`
+        *,
+        classes (
+          title,
+          teacher_id
+        )
+      `)
+      .eq('class_id', classId)
+      .eq('status', 'active')
+      .is('ended_at', null)
+      .order('started_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      console.error('❌ Database error:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Database error: ' + error.message
+      });
+    }
+
+    if (!session) {
+      console.log('⚠️ No active session found for class:', classId);
+      return res.status(404).json({
+        success: false,
+        error: 'No active session found',
+        exists: false,
+        isActive: false
+      });
+    }
+
+    console.log('✅ Found active session:', {
+      meetingId: session.meeting_id,
+      channel: session.channel_name,
+      status: session.status,
+      teacher: session.teacher_id
+    });
+
+    res.json({
+      success: true,
+      exists: true,
+      isActive: true,
+      session: {
+        id: session.id,
+        meeting_id: session.meeting_id,
+        class_id: session.class_id,
+        teacher_id: session.teacher_id,
+        channel_name: session.channel_name,
+        status: session.status,
+        started_at: session.started_at,
+        class_title: session.classes?.title
+      },
+      meetingId: session.meeting_id,
+      channel: session.channel_name,
+      teacher_id: session.teacher_id
+    });
+
+  } catch (error) {
+    console.error('❌ Error in session-by-class:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      exists: false,
+      isActive: false
+    });
+  }
+});
+
 router.get('/find-session/:classId', async (req, res) => {
   try {
     const { classId } = req.params;
