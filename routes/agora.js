@@ -451,9 +451,7 @@ router.post('/start-session', async (req, res) => {
 });
 
 // Helper function to generate UID (make sure this exists)
-function generateUniqueAgoraUid() {
-  return Math.floor(Math.random() * 100000) + 1;
-}
+
 // ==================== JOIN SESSION (PRODUCTION READY) ====================
 router.post('/join-session', async (req, res) => {
   try {
