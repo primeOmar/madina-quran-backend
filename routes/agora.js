@@ -167,6 +167,9 @@ function generateUniqueAgoraUid() {
   return uid;
 }
 
+// ============================================
+// /start-session route
+// ============================================
 
 router.post('/start-session', async (req, res) => {
   try {
@@ -202,38 +205,12 @@ router.post('/start-session', async (req, res) => {
       });
     }
 
-    // ========== GENERATE DYNAMIC IDs ==========
-    const meetingId = requested_meeting_id || `class_${class_id.replace(/-/g, '_')}_teacher_${user_id.substring(0, 8)}`;
-    const channelName = requested_channel_name || generateShortChannelName(class_id, user_id);
-
-    function generateShortChannelName(classId, userId) {
-      const shortClassId = classId.substring(0, 8);
-      const shortUserId = userId.substring(0, 8);
-      const timestamp = Date.now().toString(36).substring(0, 6);
-      return `ch_${shortClassId}_${shortUserId}_${timestamp}`.substring(0, 64);
-    }
-
-    console.log('🔄 Generated Dynamic IDs:', {
-      meetingId,
-      channelName,
-      teacherId: user_id,
-      channelLength: channelName.length
-    });
-
-    // ========== GENERATE ACCESS CODE ==========
-    const generateAccessCode = () => {
-      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-      let code = '';
-      for (let i = 0; i < 6; i++) {
-        code += chars.charAt(Math.floor(Math.random() * chars.length));
-      }
-      return code;
-    };
-
-    const accessCode = generateAccessCode();
-
     // ========== CHECK FOR EXISTING SESSION ==========
     let sessionData;
+    let channelName;
+    let meetingId;
+    let agoraUid;
+    
     const { data: existingSession } = await supabase
       .from('video_sessions')
       .select('*')
@@ -242,23 +219,67 @@ router.post('/start-session', async (req, res) => {
       .maybeSingle();
 
     if (existingSession) {
-      // Update existing session
-      const { data: updatedSession, error: updateError } = await supabase
+      // ✅ REUSE EXISTING SESSION - Use existing channel and UID!
+      sessionData = existingSession;
+      channelName = existingSession.channel_name;  
+      meetingId = existingSession.meeting_id;
+      
+      // Get existing teacher UID from session manager
+      const memorySession = sessionManager.getSession(existingSession.meeting_id);
+      agoraUid = memorySession?.teacher_agora_uid || generateUniqueAgoraUid();
+      
+      console.log('♻️ REUSING EXISTING SESSION:', {
+        meetingId,
+        channel: channelName,
+        existingUid: agoraUid,
+        willGenerateNewToken: true
+      });
+
+      // Update existing session timestamp
+      await supabase
         .from('video_sessions')
         .update({
           last_activity: new Date().toISOString(),
           expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
         })
-        .eq('id', existingSession.id)
-        .select()
-        .single();
+        .eq('id', existingSession.id);
       
-      if (updateError) throw updateError;
-      
-      sessionData = updatedSession;
-      console.log('✅ Reusing existing session:', sessionData.meeting_id);
     } else {
-      // Create new session
+      // ✅ CREATE NEW SESSION
+      meetingId = requested_meeting_id || `class_${class_id.replace(/-/g, '_')}_teacher_${user_id.substring(0, 8)}`;
+      channelName = requested_channel_name || generateShortChannelName(class_id, user_id);
+      agoraUid = generateUniqueAgoraUid();
+      
+      // Ensure UID is not 0 or 1
+      while (agoraUid === 0 || agoraUid === 1) {
+        agoraUid = generateUniqueAgoraUid();
+      }
+
+      function generateShortChannelName(classId, userId) {
+        const shortClassId = classId.substring(0, 8);
+        const shortUserId = userId.substring(0, 8);
+        const timestamp = Date.now().toString(36).substring(0, 6);
+        return `ch_${shortClassId}_${shortUserId}_${timestamp}`.substring(0, 64);
+      }
+
+      console.log('🆕 CREATING NEW SESSION:', {
+        meetingId,
+        channel: channelName,
+        newUid: agoraUid
+      });
+
+      const generateAccessCode = () => {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        let code = '';
+        for (let i = 0; i < 6; i++) {
+          code += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        return code;
+      };
+
+      const accessCode = generateAccessCode();
+
+      // Create new session in database
       const { data: newSession, error: createError } = await supabase
         .from('video_sessions')
         .insert({
@@ -280,47 +301,32 @@ router.post('/start-session', async (req, res) => {
         throw new Error(`Database error: ${createError.message}`);
       }
 
-      if (!newSession) {
-        throw new Error('Failed to create session in database');
-      }
-
       sessionData = newSession;
-      console.log('✅ Created new session:', sessionData.meeting_id);
     }
 
-    // ========== GENERATE AGORA TOKEN (PRODUCTION READY) ==========
-    let token = null;
-    let agoraUid = null;
-    let tokenError = null;
+    // ========== GENERATE AGORA TOKEN ==========
+    // ✅ CRITICAL: Token must use THE SAME channel and UID we're sending in response!
+    
+    const expirationTime = 3600; // 1 hour
+    const currentTime = Math.floor(Date.now() / 1000);
+    const privilegeExpiredTs = currentTime + expirationTime;
 
+    console.log('🔑 Generating Agora Token WITH EXACT PARAMS:', {
+      appId: appId.substring(0, 8) + '...',
+      certificateLength: appCertificate.length,
+      channel: channelName,          
+      uid: agoraUid,                
+      role: 'publisher',
+      expiresAt: new Date(privilegeExpiredTs * 1000).toISOString()
+    });
+
+    let token;
     try {
-      // Generate unique Agora UID for teacher
-      agoraUid = generateUniqueAgoraUid();
-      
-      // Ensure UID is not 0 or 1
-      while (agoraUid === 0 || agoraUid === 1) {
-        agoraUid = generateUniqueAgoraUid();
-      }
-
-      const expirationTime = 3600; // 1 hour
-      const currentTime = Math.floor(Date.now() / 1000);
-      const privilegeExpiredTs = currentTime + expirationTime;
-
-      console.log('🔑 Generating Agora Token:', {
-        appId: appId.substring(0, 8) + '...',
-        certificateLength: appCertificate.length,
-        channel: channelName,
-        uid: agoraUid,
-        role: 'publisher',
-        expiresAt: new Date(privilegeExpiredTs * 1000).toISOString()
-      });
-
-      // Generate token using correct method
       token = RtcTokenBuilder.buildTokenWithUid(
         appId,
         appCertificate,
-        channelName,
-        agoraUid,
+        channelName,    
+        agoraUid,       
         RtcRole.PUBLISHER,
         privilegeExpiredTs
       );
@@ -332,35 +338,21 @@ router.post('/start-session', async (req, res) => {
       console.log('✅ Token Generated Successfully:', {
         tokenLength: token.length,
         tokenPrefix: token.substring(0, 30) + '...',
-        uid: agoraUid
+        forChannel: channelName, 
+        forUid: agoraUid
       });
 
     } catch (tokenGenError) {
-      console.error('❌ TOKEN GENERATION FAILED:', {
-        error: tokenGenError.message,
-        stack: tokenGenError.stack,
-        appIdConfigured: !!appId,
-        certificateConfigured: !!appCertificate,
-        certificateLength: appCertificate?.length
-      });
-      
-      // CRITICAL: Do NOT fall back to demo_token in production
+      console.error('❌ TOKEN GENERATION FAILED:', tokenGenError);
       return res.status(500).json({
         success: false,
-        error: 'Agora token generation failed. Check App Certificate configuration.',
-        hint: '1. Verify App Certificate is ENABLED in Agora Console\n2. Ensure AGORA_APP_CERTIFICATE environment variable is correct\n3. Restart backend after updating environment',
+        error: 'Agora token generation failed',
         code: 'TOKEN_GENERATION_FAILED',
-        details: {
-          appIdConfigured: !!appId,
-          certificateConfigured: !!appCertificate,
-          certificateLength: appCertificate?.length,
-          expectedLength: 32,
-          error: tokenGenError.message
-        }
+        details: tokenGenError.message
       });
     }
 
-    // ========== CREATE SESSION IN MEMORY ==========
+    // ========== CREATE/UPDATE SESSION IN MEMORY ==========
     const memorySession = sessionManager.createSession(sessionData.meeting_id, {
       id: sessionData.id,
       meeting_id: sessionData.meeting_id,
@@ -368,7 +360,7 @@ router.post('/start-session', async (req, res) => {
       teacher_id: sessionData.teacher_id,
       status: 'active',
       started_at: sessionData.started_at,
-      channel_name: sessionData.channel_name,
+      channel_name: channelName,  
       access_code: sessionData.access_code,
       participants: [user_id],
       agora_uids: { [user_id]: agoraUid },
@@ -381,19 +373,21 @@ router.post('/start-session', async (req, res) => {
     console.log('💾 Session created in memory:', {
       meetingId: memorySession.meeting_id,
       teacherUid: agoraUid,
+      channel: channelName,
       participants: memorySession.participants.length
     });
 
     // ========== RETURN RESPONSE ==========
+    // ✅ CRITICAL: All values must match token generation!
     const response = {
       success: true,
       meetingId: sessionData.meeting_id,
-      channel: sessionData.channel_name,
-      channelName: sessionData.channel_name,
+      channel: channelName,          
+      channelName: channelName,     
       accessCode: sessionData.access_code,
       token: token,
       appId: appId,
-      uid: agoraUid,
+      uid: agoraUid,                 
       teacherId: user_id,
       session: {
         id: sessionData.id,
@@ -402,8 +396,8 @@ router.post('/start-session', async (req, res) => {
         class_id: sessionData.class_id,
         teacher_id: sessionData.teacher_id,
         status: 'active',
-        channel: sessionData.channel_name,
-        channel_name: sessionData.channel_name,
+        channel: channelName,     
+        channel_name: channelName,    
         participants_count: 1,
         teacher_joined: true,
         teacher_uid: agoraUid,
@@ -418,9 +412,27 @@ router.post('/start-session', async (req, res) => {
       }
     };
 
+    // ✅ FINAL VERIFICATION LOG
+    console.log('🔍 FINAL TOKEN-RESPONSE VERIFICATION:', {
+      tokenGeneratedFor: {
+        channel: channelName,
+        uid: agoraUid
+      },
+      responseContains: {
+        channel: response.channel,
+        channelName: response.channelName,
+        sessionChannel: response.session.channel_name,
+        uid: response.uid
+      },
+      allMatch: channelName === response.channel && 
+                channelName === response.channelName &&
+                channelName === response.session.channel_name &&
+                agoraUid === response.uid
+    });
+
     console.log('✅ TEACHER SESSION STARTED:', {
       meetingId: sessionData.meeting_id,
-      channel: sessionData.channel_name,
+      channel: channelName,
       tokenLength: token.length,
       uid: agoraUid,
       teacherId: user_id
@@ -429,21 +441,19 @@ router.post('/start-session', async (req, res) => {
     res.json(response);
 
   } catch (error) {
-    console.error('❌ CRITICAL ERROR in /start-session:', {
-      error: error.message,
-      stack: error.stack,
-      timestamp: new Date().toISOString()
-    });
-    
+    console.error('❌ CRITICAL ERROR in /start-session:', error);
     res.status(500).json({
       success: false,
       error: 'Failed to start video session: ' + error.message,
-      code: 'SESSION_START_FAILED',
-      hint: 'Check database connection and Agora configuration',
-      timestamp: new Date().toISOString()
+      code: 'SESSION_START_FAILED'
     });
   }
 });
+
+// Helper function to generate UID (make sure this exists)
+function generateUniqueAgoraUid() {
+  return Math.floor(Math.random() * 100000) + 1;
+}
 // ==================== JOIN SESSION (PRODUCTION READY) ====================
 router.post('/join-session', async (req, res) => {
   try {
