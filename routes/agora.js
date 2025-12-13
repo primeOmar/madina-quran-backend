@@ -2289,5 +2289,30 @@ router.post('/find-class-sessions', async (req, res) => {
     });
   }
 });
+router.get('/participants/:meetingId', async (req, res) => {
+  const { meetingId } = req.params;
+  
+  try {
+    const session = sessionManager.getSession(meetingId);
+
+    if (!session) {
+      return res.status(404).json({ success: false, error: 'Session not found' });
+    }
+
+    // This array should contain the necessary metadata for the frontend
+    const participantData = session.participants.map(p => ({
+        agoraUid: String(p.agora_uid), // Ensure UID is a string for consistency
+        name: p.name || `User ${String(p.agora_uid).slice(0, 5)}`,
+        role: p.role || 'student',
+        user_id: p.user_id 
+    }));
+    
+    return res.json({ success: true, participants: participantData });
+    
+  } catch (error) {
+    console.error('Error fetching participants:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch participant list' });
+  }
+});
 
 export default router;
