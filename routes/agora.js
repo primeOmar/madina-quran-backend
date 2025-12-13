@@ -1628,7 +1628,6 @@ router.post('/session-messages', async (req, res) => {
         profiles!video_session_messages_user_id_fkey (
           id,
           name,
-          avatar_url,
           role
         )
       `)
@@ -1764,7 +1763,6 @@ router.post('/send-message', async (req, res) => {
         profiles!video_session_messages_user_id_fkey (
           id,
           name,
-          avatar_url,
           role
         )
       `)
