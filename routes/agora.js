@@ -681,19 +681,21 @@ router.post('/join-session', async (req, res) => {
     // Log participant in database
     try {
       await supabase
-        .from('session_participants')
-        .upsert({
-          session_id: session.db_session_id || session.id,
-          user_id: user_id,
-          role: isTeacher ? 'teacher' : 'student',
-          status: 'joined',
-          joined_at: new Date().toISOString(),
-          agora_uid: agoraUid,
-          channel_name: finalChannelName,
-          meeting_id: session.meeting_id
-        }, {
-          onConflict: 'session_id,user_id'
-        });
+  .from('session_participants')
+  .upsert({
+    session_id: session.db_session_id || session.id,
+    user_id: user_id, 
+    role: isTeacher ? 'teacher' : 'student',
+    status: 'joined',
+    joined_at: new Date().toISOString(),
+    agora_uid: agoraUid,
+    channel_name: finalChannelName,
+    meeting_id: session.meeting_id,
+    is_teacher: isTeacher,  
+    student_id: isTeacher ? null : user_id  
+  }, {
+    onConflict: 'session_id,user_id'
+  });
     } catch (dbError) {
       console.warn('⚠️ Database logging failed (non-critical):', dbError.message);
     }
@@ -1364,115 +1366,81 @@ router.post('/session-participants', async (req, res) => {
       });
     }
     
-    const session = sessionManager.getSession(meeting_id);
+    // Get session info first to identify teacher
+    const { data: session } = await supabase
+      .from('video_sessions')
+      .select('id, teacher_id, class_id')
+      .eq('meeting_id', meeting_id)
+      .single();
     
     if (!session) {
-      // Try database
-      const { data: dbSession } = await supabase
-        .from('video_sessions')
-        .select('id')
-        .eq('meeting_id', meeting_id)
-        .single();
-      
-      if (!dbSession) {
-        return res.json({
-          success: true,
-          participants: []
-        });
-      }
-      
-      // Get participants from database with profiles
-      const { data: participants, error } = await supabase
-        .from('session_participants')
-        .select(`
-          *,
-          profiles:student_id (
-            id,
-            name,
-            email,
-            role
-          )
-        `)
-        .eq('session_id', dbSession.id)
-        .eq('status', 'joined')
-        .order('joined_at', { ascending: true });
-      
-      if (error) {
-        console.error('Database error:', error);
-        return res.json({
-          success: true,
-          participants: []
-        });
-      }
-      
       return res.json({
         success: true,
-        participants: (participants || []).map(p => ({
-          user_id: p.student_id,
-          agora_uid: p.agora_uid,
-          role: p.user_type || (p.is_teacher ? 'teacher' : 'student'),
-          joined_at: p.joined_at,
-          name: p.profiles?.name || 'User',
-          display_name: p.profiles?.name || (p.is_teacher ? 'Teacher' : `Student`),
-          is_teacher: p.is_teacher,
-          profile: p.profiles
-        })),
-        count: participants?.length || 0,
-        source: 'database'
+        participants: []
       });
     }
     
-    // Get user details for participants from memory
-    const participantDetails = [];
+    // Get participants from database with full profile data
+    const { data: participants, error } = await supabase
+      .from('session_participants')
+      .select(`
+        *,
+        profiles:user_id (
+          id,
+          name,
+          email,
+          role,
+          avatar_url
+        )
+      `)
+      .eq('session_id', session.id)
+      .eq('status', 'joined')
+      .order('joined_at', { ascending: true });
     
-    for (const userId of session.participants) {
-      try {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('id, name, email, role')
-          .eq('id', userId)
-          .single();
-        
-        participantDetails.push({
-          user_id: userId,
-          agora_uid: session.agora_uids[userId] || null,
-          role: userId === session.teacher_id ? 'teacher' : 'student',
-          joined_at: session.started_at,
-          name: profile?.name || 'User',
-          display_name: profile?.name || (userId === session.teacher_id ? 'Teacher' : 'Student'),
-          is_teacher: userId === session.teacher_id,
-          profile: profile || { 
-            name: userId === session.teacher_id ? 'Teacher' : 'Student', 
-            role: userId === session.teacher_id ? 'teacher' : 'student' 
-          }
-        });
-      } catch (error) {
-        // Fallback for missing profiles
-        participantDetails.push({
-          user_id: userId,
-          agora_uid: session.agora_uids[userId] || null,
-          role: userId === session.teacher_id ? 'teacher' : 'student',
-          joined_at: session.started_at,
-          name: userId === session.teacher_id ? 'Teacher' : 'Student',
-          display_name: userId === session.teacher_id ? 'Teacher' : `Student`,
-          is_teacher: userId === session.teacher_id,
-          profile: { 
-            name: userId === session.teacher_id ? 'Teacher' : 'Student',
-            role: userId === session.teacher_id ? 'teacher' : 'student' 
-          }
-        });
-      }
+    if (error) {
+      console.error('Database error:', error);
+      return res.json({
+        success: true,
+        participants: []
+      });
     }
-
-    console.log(`✅ Found ${participantDetails.length} participants for meeting`, meeting_id);
+    
+    // Format participants with correct role detection
+    const formattedParticipants = (participants || []).map(p => {
+      const isTeacher = p.user_id === session.teacher_id;
+      const name = p.profiles?.name || (isTeacher ? 'Teacher' : 'Student');
+      
+      return {
+        user_id: p.user_id,
+        agora_uid: p.agora_uid,
+        role: isTeacher ? 'teacher' : 'student',
+        is_teacher: isTeacher,
+        name: name,
+        display_name: name,
+        email: p.profiles?.email,
+        avatar_url: p.profiles?.avatar_url,
+        joined_at: p.joined_at,
+        status: p.status,
+        profile: {
+          id: p.profiles?.id,
+          name: name,
+          role: isTeacher ? 'teacher' : 'student',
+          avatar_url: p.profiles?.avatar_url
+        }
+      };
+    });
+    
+    console.log(`✅ Found ${formattedParticipants.length} participants:`, {
+      teachers: formattedParticipants.filter(p => p.is_teacher).map(p => p.name),
+      students: formattedParticipants.filter(p => !p.is_teacher).map(p => p.name)
+    });
     
     res.json({
       success: true,
-      participants: participantDetails,
-      count: participantDetails.length,
-      source: 'memory',
-      teacher_uid: session.teacher_agora_uid,
-      teacher_id: session.teacher_id
+      participants: formattedParticipants,
+      count: formattedParticipants.length,
+      teacher_id: session.teacher_id,
+      teacher_uid: formattedParticipants.find(p => p.is_teacher)?.agora_uid
     });
 
   } catch (error) {
@@ -1484,6 +1452,94 @@ router.post('/session-participants', async (req, res) => {
     });
   }
 });
+
+router.post('/get-participant-profiles', async (req, res) => {
+  try {
+    const { meeting_id, agora_uids } = req.body;
+    
+    console.log('👥 Getting participant profiles:', {
+      meeting_id,
+      uids: agora_uids
+    });
+    
+    if (!meeting_id || !agora_uids || !Array.isArray(agora_uids)) {
+      return res.status(400).json({
+        success: false,
+        error: 'meeting_id and agora_uids array required'
+      });
+    }
+    
+    // Get session first
+    const { data: session } = await supabase
+      .from('video_sessions')
+      .select('id, teacher_id')
+      .eq('meeting_id', meeting_id)
+      .single();
+    
+    if (!session) {
+      return res.json({
+        success: false,
+        profiles: []
+      });
+    }
+    
+    // Get all participants for this session with their profiles
+    const { data: participants, error } = await supabase
+      .from('session_participants')
+      .select(`
+        *,
+        profiles:user_id (
+          id,
+          name,
+          email,
+          role
+        )
+      `)
+      .eq('session_id', session.id)
+      .in('agora_uid', agora_uids)
+      .eq('status', 'joined');
+    
+    if (error) {
+      console.error('Database error:', error);
+      return res.json({
+        success: false,
+        profiles: []
+      });
+    }
+    
+    // Format profiles with proper role detection
+    const profiles = (participants || []).map(p => ({
+      user_id: p.user_id,
+      agora_uid: p.agora_uid,
+      name: p.profiles?.name || (p.user_id === session.teacher_id ? 'Teacher' : 'Student'),
+      display_name: p.profiles?.name || (p.user_id === session.teacher_id ? 'Teacher' : 'Student'),
+      email: p.profiles?.email,
+      role: p.user_id === session.teacher_id ? 'teacher' : 'student',
+      is_teacher: p.user_id === session.teacher_id,
+      joined_at: p.joined_at
+    }));
+    
+    console.log('✅ Found profiles:', {
+      count: profiles.length,
+      teacher: profiles.find(p => p.is_teacher)?.name,
+      students: profiles.filter(p => !p.is_teacher).map(p => p.name)
+    });
+    
+    res.json({
+      success: true,
+      profiles,
+      count: profiles.length
+    });
+    
+  } catch (error) {
+    console.error('❌ Error getting profiles:', error);
+    res.json({
+      success: false,
+      profiles: []
+    });
+  }
+});
+
 router.post('/update-participant', async (req, res) => {
   try {
     const { session_id, user_id, ...updates } = req.body;
