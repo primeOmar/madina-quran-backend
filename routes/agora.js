@@ -1616,7 +1616,7 @@ router.post('/session-messages', async (req, res) => {
     
     // Get messages from database with user profiles
     const { data: messages, error } = await supabase
-      .from('session_messages')
+      .from('video_session_messages')
       .select(`
         id,
         session_id,
@@ -1625,7 +1625,7 @@ router.post('/session-messages', async (req, res) => {
         message_type,
         created_at,
         updated_at,
-        profiles!session_messages_user_id_fkey (
+        profiles!video_session_messages_user_id_fkey (
           id,
           name,
           avatar_url,
@@ -1745,7 +1745,7 @@ router.post('/send-message', async (req, res) => {
     
     // Insert message into database
     const { data: newMessage, error: insertError } = await supabase
-      .from('session_messages')
+      .from('video_session_messages')
       .insert([{
         session_id: actualSessionId,
         user_id: user_id,
@@ -1761,7 +1761,7 @@ router.post('/send-message', async (req, res) => {
         message_text,
         message_type,
         created_at,
-        profiles!session_messages_user_id_fkey (
+        profiles!video_session_messages_user_id_fkey (
           id,
           name,
           avatar_url,
