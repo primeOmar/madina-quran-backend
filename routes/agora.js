@@ -2293,25 +2293,88 @@ router.get('/participants/:meetingId', async (req, res) => {
   const { meetingId } = req.params;
   
   try {
+    console.log('📡 Fetching participants for meeting:', meetingId);
+    
+    // Get session from memory
     const session = sessionManager.getSession(meetingId);
 
     if (!session) {
-      return res.status(404).json({ success: false, error: 'Session not found' });
+      console.warn('⚠️ Session not found in memory:', meetingId);
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Session not found',
+        participants: []
+      });
     }
 
-    // This array should contain the necessary metadata for the frontend
-    const participantData = session.participants.map(p => ({
-        agoraUid: String(p.agora_uid), // Ensure UID is a string for consistency
-        name: p.name || `User ${String(p.agora_uid).slice(0, 5)}`,
-        role: p.role || 'student',
-        user_id: p.user_id 
-    }));
+    console.log('📊 Session data:', {
+      meetingId,
+      participantIds: session.participants,
+      agoraUids: session.agora_uids,
+      teacherId: session.teacher_id
+    });
+
+    // Get all user IDs from session participants
+    const userIds = session.participants || [];
     
-    return res.json({ success: true, participants: participantData });
+    if (userIds.length === 0) {
+      console.log('⚠️ No participants in session yet');
+      return res.json({ 
+        success: true, 
+        participants: [] 
+      });
+    }
+
+    // Fetch full profile data from Supabase profiles table
+    const { data: profiles, error: profilesError } = await supabase
+      .from('profiles')
+      .select('id, name, role')
+      .in('id', userIds);
+
+    if (profilesError) {
+      console.error('❌ Error fetching profiles:', profilesError);
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Failed to fetch participant profiles' 
+      });
+    }
+
+    console.log('📊 Fetched profiles:', profiles);
+
+    // Map profiles to participants with Agora UIDs
+    const participantData = profiles.map(profile => {
+      const agoraUid = session.agora_uids[profile.id];
+      const isTeacher = profile.id === session.teacher_id || profile.role === 'teacher';
+      
+      return {
+        user_id: profile.id,
+        agora_uid: agoraUid,
+        name: profile.name || 'Unknown User',
+        display_name:  profile.name || 'Unknown User',
+        role: isTeacher ? 'teacher' : 'student',
+        is_teacher: isTeacher,
+        avatar_url: profile.avatar_url
+      };
+    });
+
+    console.log('✅ Returning participants:', {
+      count: participantData.length,
+      teacherCount: participantData.filter(p => p.is_teacher).length,
+      studentCount: participantData.filter(p => !p.is_teacher).length
+    });
+    
+    return res.json({ 
+      success: true, 
+      participants: participantData 
+    });
     
   } catch (error) {
-    console.error('Error fetching participants:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch participant list' });
+    console.error('❌ Error fetching participants:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch participant list',
+      details: error.message 
+    });
   }
 });
 
