@@ -1,7 +1,7 @@
 import express from 'express';
 import pkg from 'agora-access-token';
 const { RtcTokenBuilder, RtcRole } = pkg;
-import { supabase, clearCache } from '../server.js';
+import { supabase } from '../server.js';
 import { strictLimiter, veryStrictLimiter } from '../middleware/rateLimiter.js';
 import { cacheMiddleware, clearCache } from '../middleware/cache.js';
 
