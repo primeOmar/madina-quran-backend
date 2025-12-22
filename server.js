@@ -13,6 +13,7 @@ import compression from 'compression';
 import morgan from 'morgan';
 
 // Import route handlers
+import { standardLimiter } from './middleware/rateLimiter.js';
 import adminRoutes from './routes/admin.js';
 import teacherRoutes from './routes/teacher.js';
 import studentRoutes from './routes/student.js';
@@ -126,7 +127,7 @@ const limiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false
 });
-app.use(limiter);
+app.use(standardLimiter);
 
 // Body parsing
 app.use(express.json({ limit: '10mb' }));

@@ -2,6 +2,8 @@ import express from 'express';
 import pkg from 'agora-access-token';
 const { RtcTokenBuilder, RtcRole } = pkg;
 import { supabase, clearCache } from '../server.js';
+import { strictLimiter, veryStrictLimiter } from '../middleware/rateLimiter.js';
+import { cacheMiddleware, clearCache } from '../middleware/cache.js';
 
 const router = express.Router();
 
@@ -177,7 +179,7 @@ function generateUniqueAgoraUid() {
 // /start-session route
 // ============================================
 
-router.post('/start-session', async (req, res) => {
+router.post('/start-session', veryStrictLimiter, async (req, res) => {
   try {
     const { class_id, user_id, requested_meeting_id, requested_channel_name } = req.body;
     
@@ -215,12 +217,12 @@ router.post('/start-session', async (req, res) => {
     if (existingSession) {
       // ✅ CRITICAL FIX: ALWAYS use existing channel from database
       sessionData = existingSession;
-      channelName = existingSession.channel_name;  // ← FROM DATABASE (never changes)
-      meetingId = existingSession.meeting_id;      // ← FROM DATABASE (never changes)
+      channelName = existingSession.channel_name;  
+      meetingId = existingSession.meeting_id;      
       
       console.log('♻️ REUSING EXISTING SESSION:', {
         meetingId,
-        channel: channelName,  // ← This will stay consistent
+        channel: channelName,  
         fromDatabase: true
       });
 
@@ -257,7 +259,7 @@ router.post('/start-session', async (req, res) => {
 
       console.log('🆕 CREATING NEW SESSION:', {
         meetingId,
-        channel: channelName,  // ← Generated ONCE, saved to DB
+        channel: channelName, 
         newUid: agoraUid
       });
 
@@ -279,7 +281,7 @@ router.post('/start-session', async (req, res) => {
           class_id: class_id,
           teacher_id: user_id,
           meeting_id: meetingId,
-          channel_name: channelName,  // ← Saved to DB, never changes
+          channel_name: channelName, 
           access_code: accessCode,
           status: 'active',
           started_at: new Date().toISOString(),
@@ -332,7 +334,7 @@ router.post('/start-session', async (req, res) => {
     const privilegeExpiredTs = currentTime + expirationTime;
 
     console.log('🔑 Generating token for:', {
-      channel: channelName,  // ← MUST match database
+      channel: channelName,  
       uid: agoraUid,
       meeting_id: meetingId
     });
@@ -342,7 +344,7 @@ router.post('/start-session', async (req, res) => {
       token = RtcTokenBuilder.buildTokenWithUid(
         appId,
         appCertificate,
-        channelName,    // ← Uses CONSISTENT channel from database
+        channelName,    
         agoraUid,
         RtcRole.PUBLISHER,
         privilegeExpiredTs
@@ -391,12 +393,20 @@ router.post('/start-session', async (req, res) => {
       teacherUid: agoraUid
     });
 
+    // ========== CLEAR CACHE ==========
+    clearCache(`class-sessions:${class_id}`);
+    clearCache(`participants:${meetingId}`);
+    console.log('🧹 Cleared cache for:', {
+      classSessions: `class-sessions:${class_id}`,
+      participants: `participants:${meetingId}`
+    });
+
     // ========== BUILD RESPONSE ==========
     const response = {
       success: true,
       meetingId: sessionData.meeting_id,
-      channel: channelName,          // ← CONSISTENT everywhere
-      channelName: channelName,      // ← CONSISTENT everywhere
+      channel: channelName,          
+      channelName: channelName,      
       accessCode: sessionData.access_code,
       token: token,
       appId: appId,
@@ -409,8 +419,8 @@ router.post('/start-session', async (req, res) => {
         class_id: sessionData.class_id,
         teacher_id: sessionData.teacher_id,
         status: 'active',
-        channel: channelName,        // ← CONSISTENT everywhere
-        channel_name: channelName,   // ← CONSISTENT everywhere
+        channel: channelName,        
+        channel_name: channelName,   
         participants_count: 1,
         teacher_joined: true,
         teacher_uid: agoraUid,
@@ -469,7 +479,7 @@ router.post('/start-session', async (req, res) => {
 
 
 // ==================== JOIN SESSION (PRODUCTION READY) ====================
-router.post('/join-session', async (req, res) => {
+router.post('/join-session', strictLimiter, async (req, res) => {
   try {
     const { 
       meeting_id, 
@@ -700,6 +710,10 @@ router.post('/join-session', async (req, res) => {
       console.warn('⚠️ Database logging failed (non-critical):', dbError.message);
     }
 
+    // ========== CLEAR CACHE ==========
+    clearCache(`participants:${cleanMeetingId}`);
+    console.log('🧹 Cleared participants cache for:', `participants:${cleanMeetingId}`);
+
     // ========== BUILD RESPONSE ==========
     const response = {
       success: true,
@@ -817,7 +831,7 @@ router.post('/generate-fresh-token', async (req, res) => {
 });
 
 // ==================== START SESSION (TEACHER)  ====================
-// COMPLETE FIXED VERSION - Replace your entire joinChannel function
+// COMPLETE FIXED VERSION
 const joinChannel = async (sessionData) => {
   try {
     const { channel, token, uid, appId } = sessionData;
@@ -936,6 +950,14 @@ router.post('/end-session', async (req, res) => {
         .update({ status: 'finished' })
         .eq('id', dbSession.class_id);
 
+      // ========== CLEAR CACHE ==========
+      clearCache(`class-sessions:${dbSession.class_id}`);
+      clearCache(`participants:${meeting_id}`);
+      console.log('🧹 Cleared cache for ended session:', {
+        classSessions: `class-sessions:${dbSession.class_id}`,
+        participants: `participants:${meeting_id}`
+      });
+
       return res.json({
         success: true,
         message: 'Session ended successfully'
@@ -964,6 +986,14 @@ router.post('/end-session', async (req, res) => {
       .from('classes')
       .update({ status: 'finished' })
       .eq('id', session.class_id);
+
+    // ========== CLEAR CACHE ==========
+    clearCache(`class-sessions:${session.class_id}`);
+    clearCache(`participants:${meeting_id}`);
+    console.log('🧹 Cleared cache for ended session:', {
+      classSessions: `class-sessions:${session.class_id}`,
+      participants: `participants:${meeting_id}`
+    });
 
     // End session in memory
     sessionManager.endSession(meeting_id);
@@ -1579,7 +1609,10 @@ router.post('/update-participant', async (req, res) => {
 });
 
 // ==================== CHAT MESSAGES ====================
-router.post('/session-messages', async (req, res) => {
+router.post('/session-messages',
+  strictLimiter,
+  cacheMiddleware(5, (req) => `messages:${req.body.sessionId}`),
+  async (req, res) => {
   try {
     const { session_id, meeting_id, limit = 100 } = req.body;
     
@@ -2170,7 +2203,10 @@ router.post('/generate-token-only', async (req, res) => {
 });
 
 // ==================== FIND SESSIONS BY CLASS ====================
-router.post('/find-class-sessions', async (req, res) => {
+router.post('/find-class-sessions',
+  strictLimiter,
+  cacheMiddleware(15, (req) => `class-sessions:${req.body.class_id}`),
+  async (req, res) => {
   try {
     const { class_id, student_id } = req.body;
 
@@ -2289,7 +2325,10 @@ router.post('/find-class-sessions', async (req, res) => {
     });
   }
 });
-router.get('/participants/:meetingId', async (req, res) => {
+router.get('/participants/:meetingId', 
+  strictLimiter,
+  cacheMiddleware(10, (req) => `participants:${req.params.meetingId}`),
+  async (req, res) => {
   const { meetingId } = req.params;
   
   try {
