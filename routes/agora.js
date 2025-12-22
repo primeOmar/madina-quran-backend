@@ -2,9 +2,8 @@ import express from 'express';
 import pkg from 'agora-access-token';
 const { RtcTokenBuilder, RtcRole } = pkg;
 import { supabase } from '../server.js';
-import { strictLimiter, veryStrictLimiter } from '../middleware/rateLimiter.js';
-import { cacheMiddleware, clearCache } from '../middleware/cache.js';
-
+import { strictLimiter, standardLimiter, veryStrictLimiter } from '../middleware/rateLimiter.js';
+import { cacheMiddleware } from '../middleware/cache.js';
 const router = express.Router();
 
 // ==================== ENHANCED SESSION MANAGER ====================
@@ -1126,7 +1125,9 @@ router.get('/session-status/:meetingId', async (req, res) => {
   }
 });
 
-router.get('/session-info/:meetingId', async (req, res) => {
+router.get('/session-status/:meetingId', 
+  strictLimiter,
+  async (req, res) => {
   try {
     const { meetingId } = req.params;
     
@@ -1195,7 +1196,10 @@ router.get('/session-info/:meetingId', async (req, res) => {
   }
 });
 
-router.get('/session-by-class/:classId', async (req, res) => {
+router.get('/session-by-class/:classId', 
+  strictLimiter,  
+  cacheMiddleware(10, (req) => `session-by-class:${req.params.classId}`),  
+  async (req, res) => {
   try {
     const { classId } = req.params;
     
@@ -1273,7 +1277,10 @@ router.get('/session-by-class/:classId', async (req, res) => {
   }
 });
 
-router.get('/find-session/:classId', async (req, res) => {
+router.get('/find-session/:classId',
+  strictLimiter,
+  cacheMiddleware(10, (req) => `find-session:${req.params.classId}`),
+  async (req, res) => {
   try {
     const { classId } = req.params;
     
