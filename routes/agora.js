@@ -137,6 +137,47 @@ class SessionManager {
       }
     }
   }
+
+
+restoreParticipants(meetingId, participants, agora_uids = {}) {
+  const session = this.sessions.get(meetingId);
+  if (!session) {
+    console.warn(`⚠️ Cannot restore participants - session ${meetingId} not found`);
+    return false;
+  }
+  
+  // Merge existing participants with new ones
+  const currentParticipants = new Set(session.participants || []);
+  participants.forEach(participantId => {
+    currentParticipants.add(participantId);
+  });
+  
+  session.participants = Array.from(currentParticipants);
+  
+  // Merge Agora UIDs
+  session.agora_uids = { ...session.agora_uids, ...agora_uids };
+  
+  console.log('🔄 Restored participants for session:', {
+    meetingId,
+    totalParticipants: session.participants.length,
+    students: session.participants.filter(p => p !== session.teacher_id).length,
+    agoraUids: Object.keys(session.agora_uids).length
+  });
+  
+  return true;
+}
+
+getSessionParticipants(meetingId) {
+  const session = this.sessions.get(meetingId);
+  if (!session) return [];
+  
+  return {
+    participants: session.participants || [],
+    agora_uids: session.agora_uids || {},
+    teacher_id: session.teacher_id,
+    teacher_joined: session.teacher_joined || false
+  };
+}
 }
 
 const sessionManager = new SessionManager();
@@ -213,6 +254,28 @@ router.post('/start-session', veryStrictLimiter, async (req, res) => {
       .eq('status', 'active')
       .maybeSingle();
 
+    // ✅ NEW: Get existing participants BEFORE processing
+    let existingParticipants = [];
+    if (existingSession) {
+      const { data: participants } = await supabase
+        .from('session_participants')
+        .select('user_id, role, agora_uid, joined_at')
+        .eq('session_id', existingSession.id)
+        .eq('status', 'joined')
+        .neq('user_id', user_id); // Exclude teacher from participants list
+        
+      existingParticipants = participants || [];
+      
+      console.log('👥 FOUND EXISTING PARTICIPANTS:', {
+        count: existingParticipants.length,
+        participants: existingParticipants.map(p => ({
+          user_id: p.user_id,
+          role: p.role,
+          agora_uid: p.agora_uid
+        }))
+      });
+    }
+
     if (existingSession) {
       // ✅ CRITICAL FIX: ALWAYS use existing channel from database
       sessionData = existingSession;
@@ -222,7 +285,8 @@ router.post('/start-session', veryStrictLimiter, async (req, res) => {
       console.log('♻️ REUSING EXISTING SESSION:', {
         meetingId,
         channel: channelName,  
-        fromDatabase: true
+        fromDatabase: true,
+        existingParticipants: existingParticipants.length
       });
 
       // Get existing teacher UID from session manager
@@ -368,7 +432,23 @@ router.post('/start-session', veryStrictLimiter, async (req, res) => {
       });
     }
 
-    // ========== CREATE/UPDATE SESSION IN MEMORY ==========
+    // ========== CREATE/UPDATE SESSION IN MEMORY WITH PARTICIPANTS ==========
+    // ✅ CRITICAL FIX: Include existing participants in memory session
+    const participants = [user_id]; // Start with teacher
+    const agora_uids = { [user_id]: agoraUid };
+    
+    // Add existing participants if any
+    if (existingParticipants.length > 0) {
+      existingParticipants.forEach(participant => {
+        if (!participants.includes(participant.user_id)) {
+          participants.push(participant.user_id);
+        }
+        if (participant.agora_uid) {
+          agora_uids[participant.user_id] = participant.agora_uid;
+        }
+      });
+    }
+
     const memorySession = sessionManager.createSession(sessionData.meeting_id, {
       id: sessionData.id,
       meeting_id: sessionData.meeting_id,
@@ -376,20 +456,32 @@ router.post('/start-session', veryStrictLimiter, async (req, res) => {
       teacher_id: sessionData.teacher_id,
       status: 'active',
       started_at: sessionData.started_at,
-      channel_name: channelName,  // ← CONSISTENT channel
+      channel_name: channelName,
       access_code: sessionData.access_code,
-      participants: [user_id],
-      agora_uids: { [user_id]: agoraUid },
+      participants: participants, // ✅ Now includes existing students
+      agora_uids: agora_uids,     // ✅ Now includes student Agora UIDs
       teacher_joined: true,
       teacher_agora_uid: agoraUid,
       db_session_id: sessionData.id,
-      is_dynamic_id: sessionData.is_dynamic_id || false
+      is_dynamic_id: sessionData.is_dynamic_id || false,
+      // ✅ NEW: Track participant metadata for better debugging
+      participants_meta: existingParticipants.reduce((acc, p) => {
+        acc[p.user_id] = {
+          role: p.role,
+          joined_at: p.joined_at,
+          agora_uid: p.agora_uid
+        };
+        return acc;
+      }, {})
     });
 
     console.log('💾 Memory session created:', {
       meetingId: memorySession.meeting_id,
       channel: memorySession.channel_name,
-      teacherUid: agoraUid
+      teacherUid: agoraUid,
+      participantsCount: participants.length,
+      students: participants.filter(p => p !== user_id).length,
+      hasExistingParticipants: existingParticipants.length > 0
     });
 
     // ========== CLEAR CACHE ==========
@@ -400,7 +492,7 @@ router.post('/start-session', veryStrictLimiter, async (req, res) => {
       participants: `participants:${meetingId}`
     });
 
-    // ========== BUILD RESPONSE ==========
+    // ========== BUILD RESPONSE WITH PARTICIPANTS INFO ==========
     const response = {
       success: true,
       meetingId: sessionData.meeting_id,
@@ -420,17 +512,33 @@ router.post('/start-session', veryStrictLimiter, async (req, res) => {
         status: 'active',
         channel: channelName,        
         channel_name: channelName,   
-        participants_count: 1,
+        participants_count: participants.length,
+        existing_participants_count: existingParticipants.length,
         teacher_joined: true,
         teacher_uid: agoraUid,
-        is_dynamic_id: sessionData.is_dynamic_id || false
+        is_dynamic_id: sessionData.is_dynamic_id || false,
+        // ✅ NEW: Include existing participants in response
+        existing_participants: existingParticipants.map(p => ({
+          user_id: p.user_id,
+          role: p.role,
+          joined_at: p.joined_at
+        }))
       },
-      message: existingSession ? 'Rejoined existing session' : 'Session started successfully',
+      message: existingSession 
+        ? `Rejoined existing session with ${existingParticipants.length} participants` 
+        : 'Session started successfully',
       agoraConfig: {
         appIdConfigured: true,
         certificateConfigured: true,
         tokenGenerated: true,
         uidType: 'generated'
+      },
+      // ✅ NEW: Add session recovery info
+      sessionRecoveryInfo: {
+        restored_from_database: !!existingSession,
+        existing_participants: existingParticipants.length,
+        memory_session_created: true,
+        channel_consistent: sessionData.channel_name === channelName
       }
     };
 
@@ -438,13 +546,17 @@ router.post('/start-session', veryStrictLimiter, async (req, res) => {
     console.log('🔍 FINAL RESPONSE VERIFICATION:', {
       database: {
         channel: sessionData.channel_name,
-        meeting_id: sessionData.meeting_id
+        meeting_id: sessionData.meeting_id,
+        participants_in_db: existingParticipants.length
       },
-      token_generated_for: {
-        channel: channelName,
-        uid: agoraUid
+      memory_session: {
+        participants: participants.length,
+        students: participants.filter(p => p !== user_id).length,
+        agora_uids_count: Object.keys(agora_uids).length
       },
       response_contains: {
+        participants_count: response.session.participants_count,
+        existing_participants_count: response.session.existing_participants_count,
         channel: response.channel,
         channelName: response.channelName,
         sessionChannel: response.session.channel_name
@@ -454,14 +566,17 @@ router.post('/start-session', veryStrictLimiter, async (req, res) => {
         channelName === response.channel &&
         channelName === response.channelName &&
         channelName === response.session.channel_name,
-      status: sessionData.channel_name === channelName ? '✅ CONSISTENT' : '❌ MISMATCH'
+      status: sessionData.channel_name === channelName ? '✅ CONSISTENT' : '❌ MISMATCH',
+      teacherRejoinFix: existingParticipants.length > 0 ? '✅ PARTICIPANTS RESTORED' : '✅ NO PARTICIPANTS TO RESTORE'
     });
 
     console.log('✅ TEACHER SESSION RESPONSE:', {
       meetingId: response.meetingId,
       channel: response.channel,
       uid: response.uid,
-      tokenLength: response.token.length
+      tokenLength: response.token.length,
+      participants: response.session.participants_count,
+      existingParticipants: response.session.existing_participants_count
     });
 
     res.json(response);
@@ -825,6 +940,93 @@ router.post('/generate-fresh-token', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to generate token'
+    });
+  }
+});
+
+// ==================== SYNC EXISTING PARTICIPANTS ====================
+router.post('/sync-participants', strictLimiter, async (req, res) => {
+  try {
+    const { meeting_id, teacher_id } = req.body;
+    
+    console.log('🔄 SYNC PARTICIPANTS REQUEST:', { meeting_id, teacher_id });
+    
+    if (!meeting_id || !teacher_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Meeting ID and Teacher ID are required'
+      });
+    }
+    
+    // 1. Get session from database
+    const { data: session } = await supabase
+      .from('video_sessions')
+      .select('id, teacher_id')
+      .eq('meeting_id', meeting_id)
+      .eq('status', 'active')
+      .single();
+    
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        error: 'Session not found'
+      });
+    }
+    
+    // 2. Verify teacher
+    if (session.teacher_id !== teacher_id) {
+      return res.status(403).json({
+        success: false,
+        error: 'Not authorized to sync participants'
+      });
+    }
+    
+    // 3. Get all current participants
+    const { data: participants } = await supabase
+      .from('session_participants')
+      .select('user_id, role, agora_uid, joined_at')
+      .eq('session_id', session.id)
+      .eq('status', 'joined')
+      .neq('user_id', teacher_id); // Exclude teacher
+    
+    // 4. Update session manager
+    if (participants && participants.length > 0) {
+      const participantIds = participants.map(p => p.user_id);
+      const agora_uids = {};
+      
+      participants.forEach(p => {
+        if (p.agora_uid) {
+          agora_uids[p.user_id] = p.agora_uid;
+        }
+      });
+      
+      sessionManager.restoreParticipants(meeting_id, participantIds, agora_uids);
+    }
+    
+    // 5. Return sync info
+    res.json({
+      success: true,
+      participants_synced: participants?.length || 0,
+      participants: participants?.map(p => ({
+        user_id: p.user_id,
+        role: p.role,
+        joined_at: p.joined_at
+      })) || [],
+      session: {
+        meeting_id,
+        teacher_id,
+        total_participants: (participants?.length || 0) + 1 // +1 for teacher
+      },
+      message: participants?.length 
+        ? `Synced ${participants.length} existing participants` 
+        : 'No existing participants to sync'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error syncing participants:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to sync participants'
     });
   }
 });
