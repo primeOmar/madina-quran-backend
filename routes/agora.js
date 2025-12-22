@@ -1657,7 +1657,6 @@ router.post('/session-messages',
         message_text,
         message_type,
         created_at,
-        updated_at,
         profiles!video_session_messages_user_id_fkey (
           id,
           name,
