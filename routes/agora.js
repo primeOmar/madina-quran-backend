@@ -3,7 +3,7 @@ import pkg from 'agora-access-token';
 const { RtcTokenBuilder, RtcRole } = pkg;
 import { supabase } from '../server.js';
 import { strictLimiter, standardLimiter, veryStrictLimiter } from '../middleware/rateLimiter.js';
-import { cacheMiddleware } from '../middleware/cache.js';
+import { cacheMiddleware , clearCache} from '../middleware/cache.js';
 const router = express.Router();
 
 // ==================== ENHANCED SESSION MANAGER ====================
