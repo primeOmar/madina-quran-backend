@@ -59,7 +59,10 @@ const allowedOrigins = [
   "http://localhost:3000", 
   "http://localhost:3001",
   "https://madina-quran-backend.onrender.com",
-  "https://www.madinaquranclasses.com"
+  "https://www.madinaquranclasses.com",
+  "https://localhost",       
+  "http://localhost",        
+  "capacitor://localhost"
 ];
 
 console.log("🔄 Allowed CORS origins:", allowedOrigins);
