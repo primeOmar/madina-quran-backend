@@ -6,6 +6,18 @@ import { strictLimiter, standardLimiter, veryStrictLimiter } from '../middleware
 import { cacheMiddleware , clearCache} from '../middleware/cache.js';
 const router = express.Router();
 
+const hashUserIdToNumber = (uuid) => {
+  if (!uuid) return Math.floor(Math.random() * 1000000);
+  // Simple hashing algorithm to turn string UUID into a 32-bit integer
+  let hash = 0;
+  for (let i = 0; i < uuid.length; i++) {
+    const char = uuid.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return Math.abs(hash);
+};
+
 // ==================== ENHANCED SESSION MANAGER ====================
 class SessionManager {
   constructor() {
@@ -669,26 +681,21 @@ router.post('/join-session', strictLimiter, async (req, res) => {
       });
     }
 
-    // ========== SYNCED UID GENERATION (CRITICAL FIX) ==========
+    // ========== SYNCED UID GENERATION (FIXED FOR UUIDs) ==========
     let agoraUid;
+    const numericId = hashUserIdToNumber(user_id); // Convert UUID string to Number
     
     if (is_screen_share) {
-      // Logic: Screen shares MUST be TeacherID + 10000 for student detection
-      agoraUid = Number(user_id) + 10000;
+      // Screen shares: Hash of UserID + 10000
+      agoraUid = numericId + 10000;
       console.log('🖥️ Generating Screen-Share UID:', agoraUid);
     } else if (isTeacher && session.teacher_agora_uid) {
       agoraUid = session.teacher_agora_uid;
-      console.log('👨‍🏫 Teacher rejoining with existing UID:', agoraUid);
-    } else if (isTeacher) {
-      // First time teacher join - use their base ID for predictability
-      agoraUid = Number(user_id);
-      console.log('👨‍🏫 Teacher assigned base UID:', agoraUid);
     } else {
-      // Student join - Use base ID or random unique ID
-      agoraUid = Number(user_id); 
-      console.log('🎓 Student assigned UID:', agoraUid);
+      // Standard Join (Teacher or Student)
+      agoraUid = numericId;
+      console.log(`🎯 Assigned numeric UID: ${agoraUid}`);
     }
-
     // ========== GENERATE AGORA TOKEN ==========
     const expirationTime = 3600;
     const privilegeExpiredTs = Math.floor(Date.now() / 1000) + expirationTime;
@@ -717,20 +724,26 @@ router.post('/join-session', strictLimiter, async (req, res) => {
     if (!is_screen_share) {
       sessionManager.addParticipant(session.meeting_id, user_id, agoraUid, isTeacher);
       
-      try {
-        await supabase.from('session_participants').upsert({
+   try {
+        // Simplified upsert to avoid schema relationship conflicts
+        const participantRecord = {
           session_id: session.db_session_id || session.id,
           user_id: user_id, 
           role: isTeacher ? 'teacher' : 'student',
           status: 'joined',
           agora_uid: agoraUid,
           meeting_id: session.meeting_id,
-          is_teacher: isTeacher
-        }, { onConflict: 'session_id,user_id' });
+          is_teacher: isTeacher,
+          joined_at: new Date().toISOString()
+        };
+
+        await supabase
+          .from('session_participants')
+          .upsert(participantRecord, { onConflict: 'session_id,user_id' });
+          
       } catch (dbError) {
         console.warn('⚠️ DB logging failed:', dbError.message);
       }
-    }
 
     // ========== BUILD RESPONSE ==========
     res.json({
