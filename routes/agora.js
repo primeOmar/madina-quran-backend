@@ -693,14 +693,23 @@ router.post('/join-session', strictLimiter, async (req, res) => {
     }
 
     // 6. Final Response
-    return res.json({
+     return res.json({
       success: true,
-      token,
+      token: token,
       uid: agoraUid,
-      channel: session.channel_name,
+      
+      // Provide both styles to prevent "Missing Fields" errors
       appId: process.env.AGORA_APP_ID,
+      app_id: process.env.AGORA_APP_ID,
+      
       meetingId: session.meeting_id,
-      is_teacher: isTeacher
+      meeting_id: session.meeting_id,
+      
+      channel: session.channel_name,
+      channel_name: session.channel_name,
+      
+      is_teacher: isTeacher,
+      role: isTeacher ? 'teacher' : 'student'
     });
 
   } catch (error) {
@@ -1433,16 +1442,7 @@ router.post('/session-participants', async (req, res) => {
     // Get participants from database with full profile data
     const { data: participants, error } = await supabase
       .from('session_participants')
-      .select(`
-        *,
-        profiles:user_id (
-          id,
-          name,
-          email,
-          role,
-          avatar_url
-        )
-      `)
+      .select(`*`)
       .eq('session_id', session.id)
       .eq('status', 'joined')
       .order('joined_at', { ascending: true });
