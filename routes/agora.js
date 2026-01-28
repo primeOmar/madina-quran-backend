@@ -607,26 +607,12 @@ router.post('/start-session', veryStrictLimiter, async (req, res) => {
 // ==================== JOIN SESSION (PRODUCTION READY) ====================
 router.post('/join-session', strictLimiter, async (req, res) => {
   try {
-    const { 
-      meeting_id, 
-      user_id, 
-      user_type = 'student',
-      role = 'student',
-      is_screen_share = false 
-    } = req.body;
-
-    console.log('🔗 PRODUCTION JOIN REQUEST:', { meeting_id, user_id, is_screen_share });
-
-    // 1. Validate Input
-    if (!meeting_id || !user_id) {
-      return res.status(400).json({ success: false, error: 'Meeting ID and User ID required' });
-    }
-
+    const { meeting_id, user_id, user_type = 'student', is_screen_share = false } = req.body;
+    
+    // 1. Validate & Find Session
     const cleanMeetingId = meeting_id.toString().replace(/["']/g, '').trim();
-    const isTeacher = (user_type === 'teacher' || role === 'teacher');
-
-    // 2. Find Session
     let session = sessionManager.getSession(cleanMeetingId);
+    
     if (!session) {
       const { data: dbSession } = await supabase
         .from('video_sessions')
@@ -634,90 +620,67 @@ router.post('/join-session', strictLimiter, async (req, res) => {
         .eq('meeting_id', cleanMeetingId)
         .eq('status', 'active')
         .single();
-
+      
       if (dbSession) {
         session = sessionManager.createSession(dbSession.meeting_id, {
           id: dbSession.id,
-          meeting_id: dbSession.meeting_id,
           class_id: dbSession.class_id,
           teacher_id: dbSession.teacher_id,
           channel_name: dbSession.channel_name,
-          class_title: dbSession.classes?.title,
-          db_session_id: dbSession.id
+          class_title: dbSession.classes?.title
         });
       }
     }
 
-    if (!session) {
-      return res.status(404).json({ success: false, error: 'No active session found' });
-    }
+    if (!session) return res.status(404).json({ success: false, error: 'Session not found' });
 
-    // 3. Generate Numeric UID (Fixes the NaN error)
-    let agoraUid;
-    const numericId = hashUserIdToNumber(user_id); 
-    
-    if (is_screen_share) {
-      agoraUid = numericId + 10000; // Match student-side logic
-    } else if (isTeacher && session.teacher_agora_uid) {
-      agoraUid = session.teacher_agora_uid;
-    } else {
-      agoraUid = numericId;
-    }
+    // 2. Generate UID & Token (Using the Hash Fix)
+    const isTeacher = (user_type === 'teacher' || user_id === session.teacher_id);
+    const numericId = hashUserIdToNumber(user_id);
+    const agoraUid = is_screen_share ? (numericId + 10000) : numericId;
 
-    // 4. Build Token
-    const privilegeExpiredTs = Math.floor(Date.now() / 1000) + 3600;
     const token = RtcTokenBuilder.buildTokenWithUid(
       process.env.AGORA_APP_ID,
       process.env.AGORA_APP_CERTIFICATE,
       session.channel_name,
       agoraUid,
       RtcRole.PUBLISHER,
-      privilegeExpiredTs
+      Math.floor(Date.now() / 1000) + 3600
     );
 
-    // 5. Update Session State
+    // 3. Update DB (Using SCHEMA columns: student_id and class_id)
     if (!is_screen_share) {
       sessionManager.addParticipant(session.meeting_id, user_id, agoraUid, isTeacher);
       
-      // Upsert to DB
       await supabase.from('session_participants').upsert({
-        session_id: session.db_session_id || session.id,
-        user_id: user_id, 
+        session_id: session.id,
+        student_id: user_id, 
+        class_id: session.class_id, 
         role: isTeacher ? 'teacher' : 'student',
         status: 'joined',
-        agora_uid: agoraUid,
-        meeting_id: session.meeting_id,
-        is_teacher: isTeacher,
-        joined_at: new Date().toISOString()
-      }, { onConflict: 'session_id,user_id' }).select().single();
+        is_teacher: isTeacher
+      }, { onConflict: 'session_id,student_id' });
     }
 
-    // 6. Final Response
-     return res.json({
+    // 4. Send Double-Style Response (Fixes "Missing Fields" error)
+    return res.json({
       success: true,
-      token: token,
+      token,
       uid: agoraUid,
-      
-      // Provide both styles to prevent "Missing Fields" errors
-      appId: process.env.AGORA_APP_ID,
-      app_id: process.env.AGORA_APP_ID,
-      
+      appId: process.env.AGORA_APP_ID,      
+      app_id: process.env.AGORA_APP_ID,    
       meetingId: session.meeting_id,
       meeting_id: session.meeting_id,
-      
       channel: session.channel_name,
       channel_name: session.channel_name,
-      
-      is_teacher: isTeacher,
-      role: isTeacher ? 'teacher' : 'student'
+      class_title: session.class_title
     });
 
   } catch (error) {
-    console.error('❌ CRITICAL ERROR in /join-session:', error.message);
-    return res.status(500).json({ success: false, error: error.message });
+    console.error('❌ Join Error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
-});
-// ==================== GENERATE FRESH TOKEN ====================
+});// ==================== GENERATE FRESH TOKEN ====================
 router.post('/generate-fresh-token', async (req, res) => {
   try {
     const { channelName, uid, role = 'publisher' } = req.body;
@@ -1440,10 +1403,17 @@ router.post('/session-participants', async (req, res) => {
     }
     
     // Get participants from database with full profile data
-    const { data: participants, error } = await supabase
-      .from('session_participants')
-      .select(`*`)
-      .eq('session_id', session.id)
+   const { data: participants, error } = await supabase
+  .from('session_participants')
+  .select(`
+    *,
+    profiles:student_id (
+      id,
+      name,
+      email
+    )
+  `)
+  .eq('class_id', session.class_id)
       .eq('status', 'joined')
       .order('joined_at', { ascending: true });
     
@@ -2339,95 +2309,99 @@ router.post('/find-class-sessions',
   }
 });
 router.get('/participants/:meetingId', 
-  strictLimiter,
+  strictLimiter, 
   cacheMiddleware(10, (req) => `participants:${req.params.meetingId}`),
   async (req, res) => {
-  const { meetingId } = req.params;
-  
-  try {
-    console.log('📡 Fetching participants for meeting:', meetingId);
+    const { meetingId } = req.params;
     
-    // Get session from memory
-    const session = sessionManager.getSession(meetingId);
+    try {
+      console.log('📡 API: Fetching participants for:', meetingId);
+      
+      // 1. Get session from memory first
+      const session = sessionManager.getSession(meetingId);
+      if (!session) {
+        console.warn('⚠️ API: Session not found in memory:', meetingId);
+        return res.status(404).json({ 
+          success: false, 
+          error: 'Session not found',
+          participants: [] 
+        });
+      }
 
-    if (!session) {
-      console.warn('⚠️ Session not found in memory:', meetingId);
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Session not found',
-        participants: []
+      // 2. Fetch from Database using the 'student_id' relationship (Matches your Schema)
+      const { data: dbParticipants, error: dbError } = await supabase
+        .from('session_participants')
+        .select(`
+          *,
+          profiles:student_id (
+            id,
+            name,
+            avatar_url,
+            role
+          )
+        `)
+        .eq('session_id', session.id)
+        .eq('status', 'joined');
+
+      // 3. Hybrid Logic: If DB fails or is empty, use memory cache as fallback
+      // This prevents the UI from showing "Empty" if the DB hasn't updated yet.
+      if (dbError || !dbParticipants || dbParticipants.length === 0) {
+        if (dbError) console.error('❌ DB Error, falling back to memory:', dbError.message);
+        
+        const memoryParticipants = (session.participants || []).map(uid => {
+          const isTeacher = uid === session.teacher_id;
+          return {
+            user_id: uid,
+            agora_uid: session.agora_uids[uid],
+            name: isTeacher ? 'Teacher' : 'Student',
+            role: isTeacher ? 'teacher' : 'student',
+            is_teacher: isTeacher,
+            avatar_url: null
+          };
+        });
+
+        return res.json({
+          success: true,
+          source: 'memory_fallback',
+          participants: memoryParticipants,
+          count: memoryParticipants.length
+        });
+      }
+
+      // 4. Format the DB results for the Frontend
+      const formattedParticipants = dbParticipants.map(p => {
+        // Teacher detection: check flag OR check if user_id matches session teacher
+        const isTeacher = p.is_teacher || p.student_id === session.teacher_id;
+        
+        return {
+          user_id: p.student_id,
+          agora_uid: p.agora_uid || session.agora_uids[p.student_id],
+          name: p.profiles?.name || (isTeacher ? 'Teacher' : 'Student'),
+          display_name: p.profiles?.name || (isTeacher ? 'Teacher' : 'Student'),
+          role: isTeacher ? 'teacher' : 'student',
+          is_teacher: isTeacher,
+          avatar_url: p.profiles?.avatar_url,
+          joined_at: p.joined_at
+        };
       });
-    }
 
-    console.log('📊 Session data:', {
-      meetingId,
-      participantIds: session.participants,
-      agoraUids: session.agora_uids,
-      teacherId: session.teacher_id
-    });
+      console.log(`✅ API: Returning ${formattedParticipants.length} participants`);
 
-    // Get all user IDs from session participants
-    const userIds = session.participants || [];
-    
-    if (userIds.length === 0) {
-      console.log('⚠️ No participants in session yet');
-      return res.json({ 
-        success: true, 
+      return res.json({
+        success: true,
+        source: 'database',
+        participants: formattedParticipants,
+        count: formattedParticipants.length,
+        teacher_id: session.teacher_id
+      });
+
+    } catch (error) {
+      console.error('❌ CRITICAL: Participant Fetch Error:', error.message);
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Internal server error',
         participants: [] 
       });
     }
-
-    // Fetch full profile data from Supabase profiles table
-    const { data: profiles, error: profilesError } = await supabase
-      .from('profiles')
-      .select('id, name, role')
-      .in('id', userIds);
-
-    if (profilesError) {
-      console.error('❌ Error fetching profiles:', profilesError);
-      return res.status(500).json({ 
-        success: false, 
-        error: 'Failed to fetch participant profiles' 
-      });
-    }
-
-    console.log('📊 Fetched profiles:', profiles);
-
-    // Map profiles to participants with Agora UIDs
-    const participantData = profiles.map(profile => {
-      const agoraUid = session.agora_uids[profile.id];
-      const isTeacher = profile.id === session.teacher_id || profile.role === 'teacher';
-      
-      return {
-        user_id: profile.id,
-        agora_uid: agoraUid,
-        name: profile.name || 'Unknown User',
-        display_name:  profile.name || 'Unknown User',
-        role: isTeacher ? 'teacher' : 'student',
-        is_teacher: isTeacher,
-        avatar_url: profile.avatar_url
-      };
-    });
-
-    console.log('✅ Returning participants:', {
-      count: participantData.length,
-      teacherCount: participantData.filter(p => p.is_teacher).length,
-      studentCount: participantData.filter(p => !p.is_teacher).length
-    });
-    
-    return res.json({ 
-      success: true, 
-      participants: participantData 
-    });
-    
-  } catch (error) {
-    console.error('❌ Error fetching participants:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch participant list',
-      details: error.message 
-    });
-  }
 });
-
 export default router;
