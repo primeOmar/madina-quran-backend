@@ -615,43 +615,18 @@ router.post('/join-session', strictLimiter, async (req, res) => {
       is_screen_share = false 
     } = req.body;
 
-    console.log('🔗 PRODUCTION JOIN REQUEST:', { 
-      meeting_id, 
-      user_id, 
-      user_type,
-      role,
-      is_screen_share,
-      timestamp: new Date().toISOString()
-    });
+    console.log('🔗 PRODUCTION JOIN REQUEST:', { meeting_id, user_id, is_screen_share });
 
-    // ========== VALIDATE INPUT ==========
+    // 1. Validate Input
     if (!meeting_id || !user_id) {
-      return res.status(400).json({
-        success: false,
-        error: 'Meeting ID and User ID are required',
-        code: 'MISSING_PARAMS'
-      });
+      return res.status(400).json({ success: false, error: 'Meeting ID and User ID required' });
     }
 
     const cleanMeetingId = meeting_id.toString().replace(/["']/g, '').trim();
-    const effectiveUserType = user_type || role || 'student';
-    const isTeacher = effectiveUserType === 'teacher';
-    
-    // ========== VERIFY AGORA CONFIGURATION ==========
-    const appId = process.env.AGORA_APP_ID;
-    const appCertificate = process.env.AGORA_APP_CERTIFICATE;
+    const isTeacher = (user_type === 'teacher' || role === 'teacher');
 
-    if (!appId || !appCertificate) {
-      return res.status(500).json({
-        success: false,
-        error: 'Video service not configured',
-        code: 'AGORA_CONFIG_MISSING'
-      });
-    }
-
-    // ========== FIND/RESTORE SESSION ==========
+    // 2. Find Session
     let session = sessionManager.getSession(cleanMeetingId);
-    
     if (!session) {
       const { data: dbSession } = await supabase
         .from('video_sessions')
@@ -674,96 +649,65 @@ router.post('/join-session', strictLimiter, async (req, res) => {
     }
 
     if (!session) {
-      return res.status(404).json({
-        success: false,
-        error: 'No active session found',
-        code: 'SESSION_NOT_FOUND'
-      });
+      return res.status(404).json({ success: false, error: 'No active session found' });
     }
 
-    // ========== SYNCED UID GENERATION (FIXED FOR UUIDs) ==========
+    // 3. Generate Numeric UID (Fixes the NaN error)
     let agoraUid;
-    const numericId = hashUserIdToNumber(user_id); // Convert UUID string to Number
+    const numericId = hashUserIdToNumber(user_id); 
     
     if (is_screen_share) {
-      // Screen shares: Hash of UserID + 10000
-      agoraUid = numericId + 10000;
-      console.log('🖥️ Generating Screen-Share UID:', agoraUid);
+      agoraUid = numericId + 10000; // Match student-side logic
     } else if (isTeacher && session.teacher_agora_uid) {
       agoraUid = session.teacher_agora_uid;
     } else {
-      // Standard Join (Teacher or Student)
       agoraUid = numericId;
-      console.log(`🎯 Assigned numeric UID: ${agoraUid}`);
-    }
-    // ========== GENERATE AGORA TOKEN ==========
-    const expirationTime = 3600;
-    const privilegeExpiredTs = Math.floor(Date.now() / 1000) + expirationTime;
-    const finalChannelName = session.channel_name;
-
-    let token;
-    try {
-      token = RtcTokenBuilder.buildTokenWithUid(
-        appId,
-        appCertificate,
-        finalChannelName,
-        agoraUid,
-        RtcRole.PUBLISHER,
-        privilegeExpiredTs
-      );
-    } catch (tokenError) {
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to generate token',
-        code: 'TOKEN_GENERATION_FAILED'
-      });
     }
 
-    // ========== UPDATE SESSION STATE & DB ==========
-    // We only track the primary participants in the manager, not the screen track
+    // 4. Build Token
+    const privilegeExpiredTs = Math.floor(Date.now() / 1000) + 3600;
+    const token = RtcTokenBuilder.buildTokenWithUid(
+      process.env.AGORA_APP_ID,
+      process.env.AGORA_APP_CERTIFICATE,
+      session.channel_name,
+      agoraUid,
+      RtcRole.PUBLISHER,
+      privilegeExpiredTs
+    );
+
+    // 5. Update Session State
     if (!is_screen_share) {
       sessionManager.addParticipant(session.meeting_id, user_id, agoraUid, isTeacher);
       
-   try {
-        // Simplified upsert to avoid schema relationship conflicts
-        const participantRecord = {
-          session_id: session.db_session_id || session.id,
-          user_id: user_id, 
-          role: isTeacher ? 'teacher' : 'student',
-          status: 'joined',
-          agora_uid: agoraUid,
-          meeting_id: session.meeting_id,
-          is_teacher: isTeacher,
-          joined_at: new Date().toISOString()
-        };
+      // Upsert to DB
+      await supabase.from('session_participants').upsert({
+        session_id: session.db_session_id || session.id,
+        user_id: user_id, 
+        role: isTeacher ? 'teacher' : 'student',
+        status: 'joined',
+        agora_uid: agoraUid,
+        meeting_id: session.meeting_id,
+        is_teacher: isTeacher,
+        joined_at: new Date().toISOString()
+      }, { onConflict: 'session_id,user_id' }).select().single();
+    }
 
-        await supabase
-          .from('session_participants')
-          .upsert(participantRecord, { onConflict: 'session_id,user_id' });
-          
-      } catch (dbError) {
-        console.warn('⚠️ DB logging failed:', dbError.message);
-      }
-
-    // ========== BUILD RESPONSE ==========
-    res.json({
+    // 6. Final Response
+    return res.json({
       success: true,
-      meetingId: session.meeting_id,
-      channel: finalChannelName,
-      token: token,
-      appId: appId,
+      token,
       uid: agoraUid,
-      role: isTeacher ? 'teacher' : 'student',
-      is_screen_share: is_screen_share,
-      class_title: session.class_title
+      channel: session.channel_name,
+      appId: process.env.AGORA_APP_ID,
+      meetingId: session.meeting_id,
+      is_teacher: isTeacher
     });
 
   } catch (error) {
     console.error('❌ CRITICAL ERROR in /join-session:', error.message);
-    res.status(500).json({ success: false, error: error.message });
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
-
 // ==================== GENERATE FRESH TOKEN ====================
 router.post('/generate-fresh-token', async (req, res) => {
   try {
