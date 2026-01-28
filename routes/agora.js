@@ -2045,28 +2045,43 @@ router.get('/health', (req, res) => {
 
 router.post('/generate-token', standardLimiter, async (req, res) => {
   try {
-    const { channel_name, user_id, role, is_screen_share } = req.body;
+    const { channelName, uid, role } = req.body;
 
-    // Use consistent math: base ID + 10000 for screens
-    const baseUid = parseInt(user_id);
-    const uid = is_screen_share ? (baseUid + 10000) : baseUid;
+    if (!channelName) {
+      return res.status(400).json({ error: 'channelName is required' });
+    }
 
-    const agoraRole = role === 'teacher' ? RtcRole.PUBLISHER : RtcRole.SUBSCRIBER;
-    
+    let finalUid;
+    if (typeof uid === 'number') {
+      finalUid = uid;
+    } else {
+      finalUid = hashUserIdToNumber(uid);
+    }
+    // ---------------------
+
+    const privilegeLowTimeInSeconds = 3600; 
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const privilegeExpiredTs = currentTimestamp + privilegeLowTimeInSeconds;
+
     const token = RtcTokenBuilder.buildTokenWithUid(
       process.env.AGORA_APP_ID,
       process.env.AGORA_APP_CERTIFICATE,
-      channel_name,
-      uid, 
-      agoraRole,
-      Math.floor(Date.now() / 1000) + 3600
+      channelName,
+      finalUid, // Use the processed UID
+      role === 'publisher' ? RtcRole.PUBLISHER : RtcRole.SUBSCRIBER,
+      privilegeExpiredTs
     );
 
-    return res.json({ token, uid, appId: process.env.AGORA_APP_ID });
+    return res.json({ 
+      token, 
+      uid: finalUid,
+      channelName 
+    });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Token generation error:', error);
+    res.status(500).json({ error: 'Failed to generate token' });
   }
-});// ==================== TOKEN GENERATION ENDPOINT ====================
+});
 
 // ==================== SESSION RECOVERY ====================
 router.get('/session-recovery/:meetingId', async (req, res) => {
